@@ -200,43 +200,38 @@ fn generate_html() -> String {
 document.addEventListener("DOMContentLoaded", function() {{
     const tableBody = document.querySelector('tbody');
     const eventSource = new EventSource('/sse');
-    let topicCount = 0;
+
+    const topics = new Map();
 
     eventSource.addEventListener("message", function(event) {{
         const topicData = JSON.parse(event.data);
         const timestampReadable = new Date(topicData.received_timestamp)
                                     .toISOString().replace('T', ' ').replace('Z', ' UTC');
-        let rowExists = false;
 
-        Array.from(tableBody.querySelectorAll('tr')).forEach(row => {{
-            const topicCell = row.querySelector('.topic-cell');
-            if (topicCell && topicCell.textContent === topicData.key_expr) {{
-                row.innerHTML = `
-                    <td class=\"topic-cell\">${{topicData.key_expr}}</td>
-                    <td class=\"data-cell\">${{topicData.last_data_size_bytes}}</td>
-                    <td class=\"timestamp-cell\">${{timestampReadable}}</td>
-                `;
-                rowExists = true;
-            }}
+        topics.set(topicData.key_expr, {{
+            size: topicData.last_data_size_bytes,
+            timestamp: timestampReadable
         }});
 
-        if (!rowExists) {{
+        const sortedTopics = Array.from(topics.keys()).sort((a, b) => a.localeCompare(b));
+        tableBody.innerHTML = '';
+        sortedTopics.forEach(key => {{
+            const data = topics.get(key);
             tableBody.innerHTML += `
                 <tr>
-                    <td class=\"topic-cell\">${{topicData.key_expr}}</td>
-                    <td class=\"data-cell\">${{topicData.last_data_size_bytes}}</td>
-                    <td class=\"timestamp-cell\">${{timestampReadable}}</td>
+                    <td class="topic-cell">${{key}}</td>
+                    <td class="data-cell">${{data.size}}</td>
+                    <td class="timestamp-cell">${{data.timestamp}}</td>
                 </tr>
             `;
-            topicCount++;
-        }}
+        }});
 
-        document.querySelectorAll('.stat-item .stat-value')[0].textContent =
-            tableBody.querySelectorAll('tr').length;
-        document.querySelectorAll('.stat-item .stat-value')[1].textContent =
-            new Date().toLocaleTimeString();
+        document.querySelectorAll('.stat-item .stat-value')[0].textContent = topics.size;
+        document.querySelectorAll('.stat-item .stat-value')[1].textContent = new Date().toLocaleTimeString();
     }});
 }});
+
+
 </script>
 </head>
 <body>
