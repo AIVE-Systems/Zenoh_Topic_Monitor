@@ -72,230 +72,262 @@ fn generate_html() -> String {
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
 <title>Zenoh DDS Topic Monitor</title>
 <style>
-        body {{
-            display: flex;
-            flex-direction: column;
-            height: 100vh; /* full viewport height */
-            margin: 0;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: #f5f7fa;
-            color: #333;
-        }}
-        .header {{
-            text-align: center;
-            margin-bottom: 30px;
-            flex-shrink: 0;
-        }}
-        .header h1 {{
-            color: #2c3e50;
-            margin: 0;
-            font-size: 2.5rem;
-            font-weight: 300;
-        }}
-        .header p {{
-            color: #7f8c8d;
-            margin: 10px 0 0 0;
-            font-size: 1.1rem;
-        }}
+    body {{
+        display: flex;
+        flex-direction: column;
+        height: 100vh; /* full viewport height */
+        margin: 0;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        background-color: #f5f7fa;
+        color: #333;
+    }}
+    .header {{
+        text-align: center;
+        margin-bottom: 30px;
+        flex-shrink: 0;
+    }}
+    .header h1 {{
+        color: #2c3e50;
+        margin: 0;
+        font-size: 2.5rem;
+        font-weight: 300;
+    }}
+    .header p {{
+        color: #7f8c8d;
+        margin: 10px 0 0 0;
+        font-size: 1.1rem;
+    }}
+    .stats {{
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 20px;
+        border-radius: 12px;
+        margin-bottom: 25px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-shrink: 0;
+    }}
+    .stat-item {{
+        text-align: center;
+    }}
+    .stat-value {{
+        font-size: 2rem;
+        font-weight: bold;
+        display: block;
+    }}
+    .stat-label {{
+        font-size: 0.9rem;
+        opacity: 0.9;
+    }}
+    .container {{
+        flex: 1 1 auto; /* fill remaining space */
+        display: flex;
+        flex-direction: column;
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        overflow: hidden; /* hide overflow outside container */
+    }}
+    table {{
+        width: 100%;
+        border-collapse: collapse;
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto; /* allow table to expand */
+    }}
+    thead {{
+        flex: 0 0 auto; /* fixed header */
+        background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+        color: white;
+    }}
+    tbody {{
+        flex: 1 1 auto; /* fill remaining space */
+        display: block; /* allow scrolling */
+        overflow-y: auto; /* scroll only tbody */
+    }}
+    tr {{
+        display: table;
+        width: 100%;
+        table-layout: fixed; /* maintain column width */
+    }}
+    th {{
+        background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+        color: white;
+        padding: 16px;
+        text-align: left;
+        font-weight: 600;
+        font-size: 0.95rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        border-bottom: 1px solid #e8ecf0;
+    }}
+    td {{
+        padding: 12px 16px;
+        border-bottom: 1px solid #e8ecf0;
+        vertical-align: top;
+    }}
+    tr:hover {{
+        background-color: #f8f9fb;
+        transition: background-color 0.2s ease;
+    }}
+    .topic-cell {{
+        font-family: 'Fira Code', 'Courier New', monospace;
+        font-weight: 600;
+        color: #3498db;
+        max-width: 350px;
+        word-break: break-all;
+        position: relative;
+    }}
+    .size-cell {{
+        font-family: 'Fira Code', 'Courier New', monospace;
+        max-width: 450px;
+        word-break: break-word;
+        background-color: #f8f9fa;
+        border-radius: 4px;
+        padding: 8px;
+        font-size: 0.9rem;
+        line-height: 1.4;
+    }}
+    .timestamp-cell {{
+        font-size: 0.85rem;
+        color: #6c757d;
+        white-space: nowrap;
+        min-width: 180px;
+    }}
+    .refresh-info {{
+        text-align: center;
+        margin-top: 25px;
+        padding: 15px;
+        background: linear-gradient(135deg, #74b9ff 0%, #0984e3 100%);
+        color: white;
+        border-radius: 8px;
+        font-size: 0.9rem;
+        flex-shrink: 0;
+    }}
+    .no-data {{
+        text-align: center;
+        padding: 40px;
+        color: #6c757d;
+        font-style: italic;
+        font-size: 1.1rem;
+    }}
+    /* Responsive design */
+    @media (max-width: 768px) {{
         .stats {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px;
-            border-radius: 12px;
-            margin-bottom: 25px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-shrink: 0;
-        }}
-        .stat-item {{
-            text-align: center;
-        }}
-        .stat-value {{
-            font-size: 2rem;
-            font-weight: bold;
-            display: block;
-        }}
-        .stat-label {{
-            font-size: 0.9rem;
-            opacity: 0.9;
-        }}
-        .container {{
-            flex: 1 1 auto; /* fill remaining space */
-            display: flex;
             flex-direction: column;
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-            overflow: hidden; /* hide overflow outside container */
+            gap: 15px;
         }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            display: flex;
-            flex-direction: column;
-            flex: 1 1 auto; /* allow table to expand */
+        .topic-cell, .size-cell {{
+            max-width: none;
         }}
-        thead {{
-            flex: 0 0 auto; /* fixed header */
-            background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
-            color: white;
-        }}
-        tbody {{
-            flex: 1 1 auto; /* fill remaining space */
-            display: block; /* allow scrolling */
-            overflow-y: auto; /* scroll only tbody */
-        }}
-        tr {{
-            display: table;
-            width: 100%;
-            table-layout: fixed; /* maintain column width */
-        }}
-        th {{
-            background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
-            color: white;
-            padding: 16px;
-            text-align: left;
-            font-weight: 600;
-            font-size: 0.95rem;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            border-bottom: 1px solid #e8ecf0;
-        }}
-        td {{
-            padding: 12px 16px;
-            border-bottom: 1px solid #e8ecf0;
-            vertical-align: top;
-        }}
-        tr:hover {{
-            background-color: #f8f9fb;
-            transition: background-color 0.2s ease;
-        }}
-        .topic-cell {{
-            font-family: 'Fira Code', 'Courier New', monospace;
-            font-weight: 600;
-            color: #3498db;
-            max-width: 350px;
-            word-break: break-all;
-            position: relative;
-        }}
-        .data-cell {{
-            font-family: 'Fira Code', 'Courier New', monospace;
-            max-width: 450px;
-            word-break: break-word;
-            background-color: #f8f9fa;
-            border-radius: 4px;
-            padding: 8px;
+        th, td {{
+            padding: 10px 8px;
             font-size: 0.9rem;
-            line-height: 1.4;
         }}
-        .timestamp-cell {{
-            font-size: 0.85rem;
-            color: #6c757d;
-            white-space: nowrap;
-            min-width: 180px;
-        }}
-        .refresh-info {{
-            text-align: center;
-            margin-top: 25px;
-            padding: 15px;
-            background: linear-gradient(135deg, #74b9ff 0%, #0984e3 100%);
-            color: white;
-            border-radius: 8px;
-            font-size: 0.9rem;
-            flex-shrink: 0;
-        }}
-        .no-data {{
-            text-align: center;
-            padding: 40px;
-            color: #6c757d;
-            font-style: italic;
-            font-size: 1.1rem;
-        }}
-        /* Responsive design */
-        @media (max-width: 768px) {{
-            .stats {{
-                flex-direction: column;
-                gap: 15px;
+    }}
+</style>
+<script>
+document.addEventListener("DOMContentLoaded", function() {{
+    const tableBody = document.querySelector('tbody');
+    const eventSource = new EventSource('/sse');
+    const topics = new Map();
+
+    // Helper function to create or update a table row
+    function updateRow(topicData) {{
+        const rowId = `row-${{topicData.key_expr}}`;
+        let row = document.getElementById(rowId);
+
+        const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
+
+        if (row) {{
+            // Update existing row
+            row.querySelector('.size-cell').textContent = topicData.last_data_size_bytes;
+            row.querySelector('.timestamp-cell').textContent = timestampReadable;
+            row.classList.add('updated-row');
+            setTimeout(() => row.classList.remove('updated-row'), 500);
+        }} else {{
+            // Create a new row
+            row = document.createElement('tr');
+            row.id = rowId;
+            row.innerHTML = `
+                <td class="topic-cell">${{topicData.key_expr}}</td>
+                <td class="size-cell">${{topicData.last_data_size_bytes}}</td>
+                <td class="timestamp-cell">${{timestampReadable}}</td>
+            `;
+
+            // Insert the new row in the correct sorted position
+            const sortedKeys = Array.from(topics.keys()).sort((a, b) => a.localeCompare(b));
+            const newIndex = sortedKeys.indexOf(topicData.key_expr);
+            const nextKey = sortedKeys[newIndex + 1];
+
+            if (nextKey) {{
+                const nextRow = document.getElementById(`row-${{nextKey}}`);
+                tableBody.insertBefore(row, nextRow);
+            }} else {{
+                tableBody.appendChild(row);
             }}
-            .topic-cell, .data-cell {{
-                max-width: none;
-            }}
-            th, td {{
-                padding: 10px 8px;
-                font-size: 0.9rem;
-            }}
         }}
-    </style>
-    <script>
-    document.addEventListener("DOMContentLoaded", function() {{
-        const tableBody = document.querySelector('tbody');
-        const eventSource = new EventSource('/sse');
+    }}
 
-        const topics = new Map();
+    eventSource.addEventListener("message", function(event) {{
+        const newTopicsData = JSON.parse(event.data);
+        const receivedKeys = new Set(newTopicsData.map(d => d.key_expr));
 
-        eventSource.addEventListener("message", function(event) {{
-            const dataArray = JSON.parse(event.data);
-            if (!Array.isArray(dataArray) || dataArray.length === 0) return;
-
-            dataArray.forEach(topicData => {{
-                const timestampReadable = new Date(topicData.received_timestamp)
-                                            .toISOString().replace('T', ' ').replace('Z', ' UTC');
-                topics.set(topicData.key_expr, {{
-                    size: topicData.last_data_size_bytes,
-                    timestamp: timestampReadable
-                }});
-            }});
-
-            const sortedTopics = Array.from(topics.keys()).sort((a, b) => a.localeCompare(b));
-            tableBody.innerHTML = '';
-            sortedTopics.forEach(key => {{
-                const data = topics.get(key);
-                tableBody.innerHTML += `
-                    <tr>
-                        <td class="topic-cell">${{key}}</td>
-                        <td class="data-cell">${{data.size}}</td>
-                        <td class="timestamp-cell">${{data.timestamp}}</td>
-                    </tr>
-                `;
-            }});
-
-            document.querySelectorAll('.stat-item .stat-value')[0].textContent = topics.size;
-            document.querySelectorAll('.stat-item .stat-value')[1].textContent = new Date().toLocaleTimeString();
+        // Update or add topics
+        newTopicsData.forEach(topicData => {{
+            topics.set(topicData.key_expr, topicData);
+            updateRow(topicData);
         }});
+
+        // Remove topics that are no longer active
+        for (const key of topics.keys()) {{
+            if (!receivedKeys.has(key)) {{
+                const row = document.getElementById(`row-${{key}}`);
+                if (row) {{
+                    row.remove();
+                }}
+                topics.delete(key);
+            }}
+        }}
+
+        // Update stats
+        document.querySelector('.stat-item .stat-value').textContent = topics.size;
+        document.querySelectorAll('.stat-item .stat-value')[1].textContent = new Date().toLocaleTimeString();
     }});
-    </script>
+}});
+</script>
 
 </head>
 <body>
-  <div class="header">
+<div class="header">
     <h1>Zenoh DDS Monitor</h1>
     <p>Real-time topic monitoring</p>
-  </div>
-  <div class="stats">
+</div>
+<div class="stats">
     <div class="stat-item">
-      <span class="stat-value">0</span>
-      <span class="stat-label">Active Topics</span>
+        <span class="stat-value">0</span>
+        <span class="stat-label">Active Topics</span>
     </div>
     <div class="stat-item">
-      <span class="stat-value">{}</span>
-      <span class="stat-label">Last Updated</span>
+        <span class="stat-value">{}</span>
+        <span class="stat-label">Last Updated</span>
     </div>
-  </div>
+</div>
     <div class="container">
     <table>
-      <thead>
-        <tr>
-        <th>Topic</th>
-        <th>Latest Message Data Size (B)</th>
-        <th>Received Timestamp</th>
-        </tr>
-      </thead>
-      <tbody> <!-- Rows will be added dynamically --> </tbody>
+        <thead>
+            <tr>
+            <th>Topic</th>
+            <th>Latest Message Data Size (B)</th>
+            <th>Received Timestamp</th>
+            </tr>
+        </thead>
+        <tbody> </tbody>
     </table>
-  </div>
-  <div class="refresh-info"> 🔄 Updates every {}ms | Built with Zenoh + Rust + Warp </div>
+</div>
+<div class="refresh-info"> 🔄 Updates every {}ms | Built with Zenoh + Rust + Warp </div>
 </body>
 </html>"#,
         chrono::Utc::now().format("%H:%M:%S"),
