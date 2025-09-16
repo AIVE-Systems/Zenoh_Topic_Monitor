@@ -1,7 +1,7 @@
 use ftail::Ftail;
 use log::{LevelFilter, error, info};
-use serde::Serialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,11 +13,19 @@ const LOG_LEVEL: log::LevelFilter = LevelFilter::Info;
 const PORT: u16 = 8080;
 const RELOAD_PERIOD_MS: u64 = 1000;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 struct TopicData {
     key_expr: String,
     last_data_size_bytes: u64,
     received_timestamp: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct DeltaUpdate {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    updated: Vec<TopicData>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    removed: Vec<String>,
 }
 
 type TopicCache = Arc<RwLock<HashMap<String, TopicData>>>;
@@ -56,7 +64,6 @@ async fn start_zenoh_subscriber(cache: TopicCache) -> Result<(), Box<dyn std::er
         };
         info!("Received data for topic '{}'", key_expr);
 
-        // Update the cache
         cache.write().await.insert(key_expr, topic_data);
     }
 
@@ -75,7 +82,7 @@ fn generate_html() -> String {
     body {{
         display: flex;
         flex-direction: column;
-        height: 100vh; /* full viewport height */
+        height: 100vh;
         margin: 0;
         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         background-color: #f5f7fa;
@@ -122,35 +129,35 @@ fn generate_html() -> String {
         opacity: 0.9;
     }}
     .container {{
-        flex: 1 1 auto; /* fill remaining space */
+        flex: 1 1 auto;
         display: flex;
         flex-direction: column;
         background: white;
         border-radius: 12px;
         box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-        overflow: hidden; /* hide overflow outside container */
+        overflow: hidden;
     }}
     table {{
         width: 100%;
         border-collapse: collapse;
         display: flex;
         flex-direction: column;
-        flex: 1 1 auto; /* allow table to expand */
+        flex: 1 1 auto;
     }}
     thead {{
-        flex: 0 0 auto; /* fixed header */
+        flex: 0 0 auto;
         background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
         color: white;
     }}
     tbody {{
-        flex: 1 1 auto; /* fill remaining space */
-        display: block; /* allow scrolling */
-        overflow-y: auto; /* scroll only tbody */
+        flex: 1 1 auto;
+        display: block;
+        overflow-y: auto;
     }}
     tr {{
         display: table;
         width: 100%;
-        table-layout: fixed; /* maintain column width */
+        table-layout: fixed;
     }}
     th {{
         background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
@@ -213,6 +220,13 @@ fn generate_html() -> String {
         font-style: italic;
         font-size: 1.1rem;
     }}
+    .updated-row {{
+        animation: fade-highlight 0.5s ease-out;
+    }}
+    @keyframes fade-highlight {{
+        from {{ background-color: #ffffa6; }}
+        to {{ background-color: #f8f9fb; }}
+    }}
     /* Responsive design */
     @media (max-width: 768px) {{
         .stats {{
@@ -233,22 +247,25 @@ document.addEventListener("DOMContentLoaded", function() {{
     const tableBody = document.querySelector('tbody');
     const eventSource = new EventSource('/sse');
     const topics = new Map();
+    const activeTopicsCount = document.querySelector('.stats .stat-value:first-child');
+    const lastUpdatedTime = document.querySelector('.stats .stat-value:last-child');
 
-    // Helper function to create or update a table row
+    function updateStats() {{
+        activeTopicsCount.textContent = topics.size;
+        lastUpdatedTime.textContent = new Date().toLocaleTimeString();
+    }}
+
     function updateRow(topicData) {{
         const rowId = `row-${{topicData.key_expr}}`;
         let row = document.getElementById(rowId);
-
         const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
 
         if (row) {{
-            // Update existing row
             row.querySelector('.size-cell').textContent = topicData.last_data_size_bytes;
             row.querySelector('.timestamp-cell').textContent = timestampReadable;
             row.classList.add('updated-row');
             setTimeout(() => row.classList.remove('updated-row'), 500);
         }} else {{
-            // Create a new row
             row = document.createElement('tr');
             row.id = rowId;
             row.innerHTML = `
@@ -257,44 +274,45 @@ document.addEventListener("DOMContentLoaded", function() {{
                 <td class="timestamp-cell">${{timestampReadable}}</td>
             `;
 
-            // Insert the new row in the correct sorted position
             const sortedKeys = Array.from(topics.keys()).sort((a, b) => a.localeCompare(b));
             const newIndex = sortedKeys.indexOf(topicData.key_expr);
             const nextKey = sortedKeys[newIndex + 1];
 
             if (nextKey) {{
                 const nextRow = document.getElementById(`row-${{nextKey}}`);
-                tableBody.insertBefore(row, nextRow);
+                if (nextRow) {{
+                    tableBody.insertBefore(row, nextRow);
+                }} else {{
+                    tableBody.appendChild(row);
+                }}
             }} else {{
                 tableBody.appendChild(row);
             }}
         }}
     }}
 
-    eventSource.addEventListener("message", function(event) {{
-        const newTopicsData = JSON.parse(event.data);
-        const receivedKeys = new Set(newTopicsData.map(d => d.key_expr));
+    function removeRow(topicKey) {{
+        const rowId = `row-${{topicKey}}`;
+        const row = document.getElementById(rowId);
+        if (row) {{
+            row.remove();
+        }}
+    }}
 
-        // Update or add topics
-        newTopicsData.forEach(topicData => {{
+    eventSource.addEventListener("message", function(event) {{
+        const delta = JSON.parse(event.data);
+
+        delta.updated.forEach(topicData => {{
             topics.set(topicData.key_expr, topicData);
             updateRow(topicData);
         }});
 
-        // Remove topics that are no longer active
-        for (const key of topics.keys()) {{
-            if (!receivedKeys.has(key)) {{
-                const row = document.getElementById(`row-${{key}}`);
-                if (row) {{
-                    row.remove();
-                }}
-                topics.delete(key);
-            }}
-        }}
+        delta.removed.forEach(topicKey => {{
+            topics.delete(topicKey);
+            removeRow(topicKey);
+        }});
 
-        // Update stats
-        document.querySelector('.stat-item .stat-value').textContent = topics.size;
-        document.querySelectorAll('.stat-item .stat-value')[1].textContent = new Date().toLocaleTimeString();
+        updateStats();
     }});
 }});
 </script>
@@ -336,19 +354,45 @@ document.addEventListener("DOMContentLoaded", function() {{
 }
 
 async fn sse_handler(cache: TopicCache) -> Result<impl warp::Reply, warp::Rejection> {
-    let stream = futures::stream::unfold(cache, |cache| async move {
-        let mut interval = time::interval(Duration::from_millis(RELOAD_PERIOD_MS));
-        interval.tick().await;
+    let stream = futures::stream::unfold(
+        (cache, HashMap::<String, TopicData>::new()),
+        |(cache, last_snapshot)| async move {
+            let (updated, removed, new_last_snapshot) = {
+                let mut interval = time::interval(Duration::from_millis(RELOAD_PERIOD_MS));
+                interval.tick().await;
 
-        // Read the latest cache
-        let snapshot: Vec<TopicData> = cache.read().await.values().cloned().collect();
+                let current_cache = cache.read().await;
 
-        let event = sse::Event::default()
-            .event("message")
-            .data(serde_json::to_string(&snapshot).unwrap());
+                let mut updated: Vec<TopicData> = Vec::new();
+                let mut removed: Vec<String> = Vec::new();
 
-        Some((Ok::<_, warp::Error>(event), cache))
-    });
+                let current_keys: HashSet<&String> = current_cache.keys().collect();
+                let last_keys: HashSet<&String> = last_snapshot.keys().collect();
+
+                for (key, value) in current_cache.iter() {
+                    if last_snapshot.get(key) != Some(value) {
+                        updated.push(value.clone());
+                    }
+                }
+
+                for key in last_keys.difference(&current_keys) {
+                    removed.push(key.to_string());
+                }
+
+                let new_last_snapshot = current_cache.clone();
+
+                (updated, removed, new_last_snapshot)
+            };
+
+            let delta = DeltaUpdate { updated, removed };
+
+            let event = sse::Event::default()
+                .event("message")
+                .data(serde_json::to_string(&delta).unwrap());
+
+            Some((Ok::<_, warp::Error>(event), (cache, new_last_snapshot)))
+        },
+    );
 
     Ok(warp::sse::reply(warp::sse::keep_alive().stream(stream)))
 }
