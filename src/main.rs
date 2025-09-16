@@ -1,27 +1,21 @@
 use ftail::Ftail;
 use log::{LevelFilter, error, info, warn};
-use std::collections::HashMap;
+use serde::Serialize;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use warp::Filter;
+use tokio::sync::broadcast;
+use warp::{Filter, sse};
 
 const LOG_LEVEL: log::LevelFilter = LevelFilter::Info;
-const REFRESH_PERIOD_MS: u16 = 1000;
 const PORT: u16 = 8080;
 
-// Data structure to hold topic information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct TopicData {
     key_expr: String,
     last_data_size_bytes: u64,
     received_timestamp: u64,
 }
 
-// Shared state for storing topic data
-type SharedTopics = Arc<Mutex<HashMap<String, TopicData>>>;
-
-// Get current timestamp in milliseconds
 fn get_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -29,11 +23,10 @@ fn get_timestamp() -> u64 {
         .as_millis() as u64
 }
 
-// Start Zenoh subscriber for all topics
-async fn start_zenoh_subscriber(topics: SharedTopics) -> Result<(), Box<dyn std::error::Error>> {
+async fn start_zenoh_subscriber(
+    tx: broadcast::Sender<TopicData>,
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("Opening Zenoh session...");
-
-    // Configure Zenoh similar to your main application
     let mut config = zenoh::Config::default();
     config
         .insert_json5("connect/endpoints", "['tcp/127.0.0.1:7447']")
@@ -41,75 +34,39 @@ async fn start_zenoh_subscriber(topics: SharedTopics) -> Result<(), Box<dyn std:
     config.insert_json5("mode", "'peer'").unwrap();
     let zenoh_session = zenoh::open(config).await.unwrap();
     info!("Zenoh session opened.");
-
     info!("Subscribing to all topics (**)");
     let subscriber = zenoh_session
         .declare_subscriber("**")
         .await
         .map_err(|e| format!("Failed to declare subscriber: {}", e))?;
-
     info!("Zenoh subscriber started, waiting for messages...");
-
     while let Ok(sample) = subscriber.recv_async().await {
         let key_expr = sample.key_expr().as_str();
-        let data_bytes = *(&sample.payload().to_bytes().len()) as u64;
+        let data_bytes = sample.payload().to_bytes().len() as u64;
         let timestamp = get_timestamp();
-
         let topic_data = TopicData {
             key_expr: key_expr.to_string(),
             last_data_size_bytes: data_bytes,
             received_timestamp: timestamp,
         };
-
-        {
-            let mut topics_map = topics.lock().unwrap();
-            topics_map.insert(key_expr.to_string(), topic_data);
-        }
-
+        tx.send(topic_data)?;
         info!(
             "Received {}B on topic '{}' at {}",
             data_bytes, key_expr, timestamp
         );
     }
-
     Ok(())
 }
 
-// Generate HTML page with improved styling
-fn generate_html(topics: &HashMap<String, TopicData>) -> String {
-    let mut rows = String::new();
-
-    // Sort topics alphabetically for consistent display
-    let mut sorted_topics: Vec<_> = topics.iter().collect();
-    sorted_topics.sort_by_key(|(k, _)| k.as_str());
-
-    for (_, topic_data) in sorted_topics {
-        let timestamp_readable =
-            chrono::DateTime::from_timestamp_millis(topic_data.received_timestamp as i64)
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.3f UTC").to_string())
-                .unwrap_or_else(|| "Invalid timestamp".to_string());
-
-        rows.push_str(&format!(
-            r#"
-            <tr>
-                <td class="topic-cell">{}</td>
-                <td class="data-cell">{}</td>
-                <td class="timestamp-cell">{}</td>
-            </tr>"#,
-            html_escape::encode_text(&topic_data.key_expr),
-            topic_data.last_data_size_bytes,
-            timestamp_readable
-        ));
-    }
-
+fn generate_html() -> String {
     format!(
         r#"<!DOCTYPE html>
-<html lang="en">
+<html lang=\"en\">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Zenoh DDS Topic Monitor</title>
-    <style>
+<meta charset=\"UTF-8\">
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+<title>Zenoh DDS Topic Monitor</title>
+<style>
         body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             margin: 0;
@@ -239,91 +196,122 @@ fn generate_html(topics: &HashMap<String, TopicData>) -> String {
             }}
         }}
     </style>
-    <script>
-        // Auto-refresh
-        setTimeout(function() {{
-            location.reload();
-        }}, {});
+<script>
+document.addEventListener("DOMContentLoaded", function() {{
+    const tableBody = document.querySelector('tbody');
+    const eventSource = new EventSource('/sse');
+    let topicCount = 0;
 
-        // Add loading indicator
-        window.addEventListener('beforeunload', function() {{
-            document.body.style.opacity = '0.7';
+    eventSource.addEventListener("message", function(event) {{
+        const topicData = JSON.parse(event.data);
+        const timestampReadable = new Date(topicData.received_timestamp)
+                                    .toISOString().replace('T', ' ').replace('Z', ' UTC');
+        let rowExists = false;
+
+        Array.from(tableBody.querySelectorAll('tr')).forEach(row => {{
+            const topicCell = row.querySelector('.topic-cell');
+            if (topicCell && topicCell.textContent === topicData.key_expr) {{
+                row.innerHTML = `
+                    <td class=\"topic-cell\">${{topicData.key_expr}}</td>
+                    <td class=\"data-cell\">${{topicData.last_data_size_bytes}}</td>
+                    <td class=\"timestamp-cell\">${{timestampReadable}}</td>
+                `;
+                rowExists = true;
+            }}
         }});
-    </script>
+
+        if (!rowExists) {{
+            tableBody.innerHTML += `
+                <tr>
+                    <td class=\"topic-cell\">${{topicData.key_expr}}</td>
+                    <td class=\"data-cell\">${{topicData.last_data_size_bytes}}</td>
+                    <td class=\"timestamp-cell\">${{timestampReadable}}</td>
+                </tr>
+            `;
+            topicCount++;
+        }}
+
+        document.querySelectorAll('.stat-item .stat-value')[0].textContent =
+            tableBody.querySelectorAll('tr').length;
+        document.querySelectorAll('.stat-item .stat-value')[1].textContent =
+            new Date().toLocaleTimeString();
+    }});
+}});
+</script>
 </head>
 <body>
-    <div class="header">
-        <h1>Zenoh DDS Monitor</h1>
-        <p>Real-time topic monitoring</p>
+  <div class="header">
+    <h1>Zenoh DDS Monitor</h1>
+    <p>Real-time topic monitoring</p>
+  </div>
+  <div class="stats">
+    <div class="stat-item">
+      <span class="stat-value">0</span>
+      <span class="stat-label">Active Topics</span>
     </div>
-
-    <div class="stats">
-        <div class="stat-item">
-            <span class="stat-value">{}</span>
-            <span class="stat-label">Active Topics</span>
-        </div>
-        <div class="stat-item">
-            <span class="stat-value">{}</span>
-            <span class="stat-label">Last Updated</span>
-        </div>
+    <div class="stat-item">
+      <span class="stat-value">{}</span>
+      <span class="stat-label">Last Updated</span>
     </div>
-
+  </div>
     <div class="container">
-        <table>
-            <thead>
-                <tr>
-                    <th>Topic</th>
-                    <th>Latest Message Data Size (B)</th>
-                    <th>Received Timestamp</th>
-                </tr>
-            </thead>
-            <tbody>
-                {}
-            </tbody>
-        </table>
-    </div>
-
-    <div class="refresh-info">
-        🔄 Page refreshes automatically every {}ms | Built with Zenoh + Rust + Warp
-    </div>
+    <table>
+      <thead>
+        <tr>
+        <th>Topic</th>
+        <th>Latest Message Data Size (B)</th>
+        <th>Received Timestamp</th>
+        </tr>
+      </thead>
+      <tbody> <!-- Rows will be added dynamically --> </tbody>
+    </table>
+  </div>
+  <div class="refresh-info"> 🔄 Updates in real-time via SSE | Built with Zenoh + Rust + Warp </div>
 </body>
 </html>"#,
-        REFRESH_PERIOD_MS,
-        topics.len(),
-        chrono::Utc::now().format("%H:%M:%S"),
-        if rows.is_empty() {
-            r#"<tr><td colspan="3" class="no-data">No topics received yet... Waiting for Zenoh messages</td></tr>"#
-        } else {
-            &rows
-        },
-        REFRESH_PERIOD_MS,
+        chrono::Utc::now().format("%H:%M:%S")
     )
 }
 
-/// Start the web server.
-///
-/// # Arguments
-/// * `topics` - Shared topics state wrapped in Arc<Mutex<_>>.
-async fn start_web_server(topics: SharedTopics) {
-    let topics_filter = warp::any().map(move || topics.clone());
+async fn sse_handler(
+    rx: broadcast::Receiver<TopicData>,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        match rx.recv().await {
+            Ok(topic_data) => {
+                let event = sse::Event::default()
+                    .event("message")
+                    .data(serde_json::to_string(&topic_data).unwrap());
+                Some((Ok::<_, warp::Error>(event), rx))
+            }
+            Err(_) => None,
+        }
+    });
 
-    let routes = warp::path::end()
-        .and(topics_filter)
-        .map(|topics: SharedTopics| {
-            let topics_map = topics.lock().unwrap();
-            let html = generate_html(&topics_map);
-            warp::reply::html(html)
-        });
+    Ok(warp::sse::reply(warp::sse::keep_alive().stream(stream)))
+}
 
-    let port: u16 = PORT as u16;
+async fn start_web_server(tx: broadcast::Sender<TopicData>) {
+    let tx_filter = tx.clone();
 
-    info!("Starting web server on http://localhost:{}", port);
-    warp::serve(routes).run(([127, 0, 0, 1], port)).await;
+    let index = warp::path::end()
+        .map(|| warp::reply::html(generate_html()))
+        .boxed();
+
+    let sse_route = warp::path("sse")
+        .map(move || tx_filter.subscribe())
+        .and_then(|rx: broadcast::Receiver<TopicData>| sse_handler(rx))
+        .boxed();
+
+    let routes = index.or(sse_route);
+
+    info!("Starting web server on http://localhost:{}", PORT);
+    warp::serve(routes).run(([127, 0, 0, 1], PORT)).await;
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all("logs").unwrap();
+    std::fs::create_dir_all("logs")?;
     Ftail::new()
         .console(LOG_LEVEL)
         .daily_file(Path::new("logs"), LOG_LEVEL)
@@ -336,33 +324,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         });
 
-    if REFRESH_PERIOD_MS == 0 {
-        error!("Refresh period cannot be zero");
-        std::process::exit(1);
-    }
-
-    // Shared state for storing topic data
-    let topics: SharedTopics = Arc::new(Mutex::new(HashMap::new()));
-
     info!("Starting Zenoh DDS Web Monitor...");
 
-    // Clone for different tasks
-    let topics_subscriber = topics.clone();
-    let topics_server = topics.clone();
+    let (tx, _rx) = broadcast::channel(32);
+    let tx_server = tx.clone();
 
-    // Start Zenoh subscriber task
     let subscriber_task = tokio::spawn(async move {
-        if let Err(e) = start_zenoh_subscriber(topics_subscriber).await {
+        if let Err(e) = start_zenoh_subscriber(tx).await {
             error!("Zenoh subscriber error: {}", e);
         }
     });
 
-    // Start web server task
     let server_task = tokio::spawn(async move {
-        start_web_server(topics_server).await;
+        start_web_server(tx_server).await;
     });
 
-    // Wait for either task to complete (or both)
     tokio::select! {
         _ = subscriber_task => warn!("Zenoh subscriber task completed"),
         _ = server_task => warn!("Web server task completed"),
@@ -372,5 +348,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!("Zenoh DDS Web Monitor stopped.");
+
     Ok(())
 }
