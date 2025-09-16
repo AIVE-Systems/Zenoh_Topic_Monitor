@@ -140,11 +140,9 @@ fn generate_html() -> String {
     table {{
         width: 100%;
         border-collapse: collapse;
-        /* --- MODIFIED --- */
         display: flex;
         flex-direction: column;
         height: 100%;
-        /* --- END MODIFIED --- */
     }}
     thead {{
         display: table-header-group;
@@ -154,9 +152,7 @@ fn generate_html() -> String {
     tbody {{
         display: block;
         overflow-y: auto;
-        /* --- MODIFIED --- */
         flex: 1 1 auto;
-        /* --- END MODIFIED --- */
     }}
     tr {{
         display: table;
@@ -260,18 +256,21 @@ document.addEventListener("DOMContentLoaded", function() {{
         lastUpdatedTime.textContent = new Date().toLocaleTimeString();
     }}
 
-    // Function to update a row in the table
+    // --- MODIFIED FUNCTION ---
+    // This function now handles both updates and sorted insertions.
     function updateRow(topicData) {{
         const rowId = `row-${{topicData.key_expr.replace(/[^\w-]/g, '_')}}`;
         let row = document.getElementById(rowId);
         const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
 
         if (row) {{
+            // Row exists, just update its content.
             row.querySelector('.size-cell').textContent = topicData.last_data_size_bytes;
             row.querySelector('.timestamp-cell').textContent = timestampReadable;
             row.classList.add('updated-row');
             setTimeout(() => row.classList.remove('updated-row'), 500);
         }} else {{
+            // Row is new, create it and insert it into the correct sorted position.
             row = document.createElement('tr');
             row.id = rowId;
             row.innerHTML = `
@@ -279,9 +278,25 @@ document.addEventListener("DOMContentLoaded", function() {{
                 <td class="size-cell">${{topicData.last_data_size_bytes}}</td>
                 <td class="timestamp-cell">${{timestampReadable}}</td>
             `;
-            tableBody.appendChild(row);
+
+            const existingRows = tableBody.querySelectorAll('tr');
+            let inserted = false;
+            for (const existingRow of existingRows) {{
+                const existingTopic = existingRow.querySelector('.topic-cell').textContent;
+                if (topicData.key_expr.localeCompare(existingTopic) < 0) {{
+                    tableBody.insertBefore(row, existingRow);
+                    inserted = true;
+                    break;
+                }}
+            }}
+
+            if (!inserted) {{
+                // If the new topic is alphabetically last, or the table is empty.
+                tableBody.appendChild(row);
+            }}
         }}
     }}
+    // --- END MODIFIED FUNCTION ---
 
     // Function to remove a row from the table
     function removeRow(topicKey) {{
@@ -305,6 +320,8 @@ document.addEventListener("DOMContentLoaded", function() {{
             topics.delete(topicKey);
             removeRow(topicKey);
         }});
+
+        // No longer need to call sortTable() here.
     }});
 
     // Initial call to set the time immediately
