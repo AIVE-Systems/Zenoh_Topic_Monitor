@@ -1,13 +1,17 @@
 use ftail::Ftail;
-use log::{LevelFilter, error, info, warn};
+use log::{LevelFilter, error, info};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::broadcast;
+use tokio::sync::RwLock;
+use tokio::time::{self, Duration};
 use warp::{Filter, sse};
 
 const LOG_LEVEL: log::LevelFilter = LevelFilter::Info;
 const PORT: u16 = 8080;
+const RELOAD_PERIOD_MS: u64 = 1000;
 
 #[derive(Debug, Clone, Serialize)]
 struct TopicData {
@@ -16,6 +20,8 @@ struct TopicData {
     received_timestamp: u64,
 }
 
+type TopicCache = Arc<RwLock<HashMap<String, TopicData>>>;
+
 fn get_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -23,9 +29,7 @@ fn get_timestamp() -> u64 {
         .as_millis() as u64
 }
 
-async fn start_zenoh_subscriber(
-    tx: broadcast::Sender<TopicData>,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn start_zenoh_subscriber(cache: TopicCache) -> Result<(), Box<dyn std::error::Error>> {
     info!("Opening Zenoh session...");
     let mut config = zenoh::Config::default();
     config
@@ -33,28 +37,29 @@ async fn start_zenoh_subscriber(
         .unwrap();
     config.insert_json5("mode", "'peer'").unwrap();
     let zenoh_session = zenoh::open(config).await.unwrap();
-    info!("Zenoh session opened.");
-    info!("Subscribing to all topics (**)");
+
     let subscriber = zenoh_session
         .declare_subscriber("**")
         .await
         .map_err(|e| format!("Failed to declare subscriber: {}", e))?;
+
     info!("Zenoh subscriber started, waiting for messages...");
     while let Ok(sample) = subscriber.recv_async().await {
-        let key_expr = sample.key_expr().as_str();
+        let key_expr = sample.key_expr().as_str().to_string();
         let data_bytes = sample.payload().to_bytes().len() as u64;
         let timestamp = get_timestamp();
+
         let topic_data = TopicData {
-            key_expr: key_expr.to_string(),
+            key_expr: key_expr.clone(),
             last_data_size_bytes: data_bytes,
             received_timestamp: timestamp,
         };
-        tx.send(topic_data)?;
-        info!(
-            "Received {}B on topic '{}' at {}",
-            data_bytes, key_expr, timestamp
-        );
+        info!("Received data for topic '{}'", key_expr);
+
+        // Update the cache
+        cache.write().await.insert(key_expr, topic_data);
     }
+
     Ok(())
 }
 
@@ -68,15 +73,18 @@ fn generate_html() -> String {
 <title>Zenoh DDS Topic Monitor</title>
 <style>
         body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh; /* full viewport height */
             margin: 0;
-            padding: 20px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background-color: #f5f7fa;
             color: #333;
         }}
         .header {{
             text-align: center;
             margin-bottom: 30px;
+            flex-shrink: 0;
         }}
         .header h1 {{
             color: #2c3e50;
@@ -99,6 +107,7 @@ fn generate_html() -> String {
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-shrink: 0;
         }}
         .stat-item {{
             text-align: center;
@@ -113,14 +122,35 @@ fn generate_html() -> String {
             opacity: 0.9;
         }}
         .container {{
+            flex: 1 1 auto; /* fill remaining space */
+            display: flex;
+            flex-direction: column;
             background: white;
             border-radius: 12px;
             box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-            overflow: hidden;
+            overflow: hidden; /* hide overflow outside container */
         }}
         table {{
             width: 100%;
             border-collapse: collapse;
+            display: flex;
+            flex-direction: column;
+            flex: 1 1 auto; /* allow table to expand */
+        }}
+        thead {{
+            flex: 0 0 auto; /* fixed header */
+            background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+            color: white;
+        }}
+        tbody {{
+            flex: 1 1 auto; /* fill remaining space */
+            display: block; /* allow scrolling */
+            overflow-y: auto; /* scroll only tbody */
+        }}
+        tr {{
+            display: table;
+            width: 100%;
+            table-layout: fixed; /* maintain column width */
         }}
         th {{
             background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
@@ -131,6 +161,7 @@ fn generate_html() -> String {
             font-size: 0.95rem;
             text-transform: uppercase;
             letter-spacing: 0.5px;
+            border-bottom: 1px solid #e8ecf0;
         }}
         td {{
             padding: 12px 16px;
@@ -173,6 +204,7 @@ fn generate_html() -> String {
             color: white;
             border-radius: 8px;
             font-size: 0.9rem;
+            flex-shrink: 0;
         }}
         .no-data {{
             text-align: center;
@@ -196,43 +228,45 @@ fn generate_html() -> String {
             }}
         }}
     </style>
-<script>
-document.addEventListener("DOMContentLoaded", function() {{
-    const tableBody = document.querySelector('tbody');
-    const eventSource = new EventSource('/sse');
+    <script>
+    document.addEventListener("DOMContentLoaded", function() {{
+        const tableBody = document.querySelector('tbody');
+        const eventSource = new EventSource('/sse');
 
-    const topics = new Map();
+        const topics = new Map();
 
-    eventSource.addEventListener("message", function(event) {{
-        const topicData = JSON.parse(event.data);
-        const timestampReadable = new Date(topicData.received_timestamp)
-                                    .toISOString().replace('T', ' ').replace('Z', ' UTC');
+        eventSource.addEventListener("message", function(event) {{
+            const dataArray = JSON.parse(event.data);
+            if (!Array.isArray(dataArray) || dataArray.length === 0) return;
 
-        topics.set(topicData.key_expr, {{
-            size: topicData.last_data_size_bytes,
-            timestamp: timestampReadable
+            dataArray.forEach(topicData => {{
+                const timestampReadable = new Date(topicData.received_timestamp)
+                                            .toISOString().replace('T', ' ').replace('Z', ' UTC');
+                topics.set(topicData.key_expr, {{
+                    size: topicData.last_data_size_bytes,
+                    timestamp: timestampReadable
+                }});
+            }});
+
+            const sortedTopics = Array.from(topics.keys()).sort((a, b) => a.localeCompare(b));
+            tableBody.innerHTML = '';
+            sortedTopics.forEach(key => {{
+                const data = topics.get(key);
+                tableBody.innerHTML += `
+                    <tr>
+                        <td class="topic-cell">${{key}}</td>
+                        <td class="data-cell">${{data.size}}</td>
+                        <td class="timestamp-cell">${{data.timestamp}}</td>
+                    </tr>
+                `;
+            }});
+
+            document.querySelectorAll('.stat-item .stat-value')[0].textContent = topics.size;
+            document.querySelectorAll('.stat-item .stat-value')[1].textContent = new Date().toLocaleTimeString();
         }});
-
-        const sortedTopics = Array.from(topics.keys()).sort((a, b) => a.localeCompare(b));
-        tableBody.innerHTML = '';
-        sortedTopics.forEach(key => {{
-            const data = topics.get(key);
-            tableBody.innerHTML += `
-                <tr>
-                    <td class="topic-cell">${{key}}</td>
-                    <td class="data-cell">${{data.size}}</td>
-                    <td class="timestamp-cell">${{data.timestamp}}</td>
-                </tr>
-            `;
-        }});
-
-        document.querySelectorAll('.stat-item .stat-value')[0].textContent = topics.size;
-        document.querySelectorAll('.stat-item .stat-value')[1].textContent = new Date().toLocaleTimeString();
     }});
-}});
+    </script>
 
-
-</script>
 </head>
 <body>
   <div class="header">
@@ -261,41 +295,42 @@ document.addEventListener("DOMContentLoaded", function() {{
       <tbody> <!-- Rows will be added dynamically --> </tbody>
     </table>
   </div>
-  <div class="refresh-info"> 🔄 Updates in real-time via SSE | Built with Zenoh + Rust + Warp </div>
+  <div class="refresh-info"> 🔄 Updates every {}ms | Built with Zenoh + Rust + Warp </div>
 </body>
 </html>"#,
-        chrono::Utc::now().format("%H:%M:%S")
+        chrono::Utc::now().format("%H:%M:%S"),
+        RELOAD_PERIOD_MS
     )
 }
 
-async fn sse_handler(
-    rx: broadcast::Receiver<TopicData>,
-) -> Result<impl warp::Reply, warp::Rejection> {
-    let stream = futures::stream::unfold(rx, |mut rx| async move {
-        match rx.recv().await {
-            Ok(topic_data) => {
-                let event = sse::Event::default()
-                    .event("message")
-                    .data(serde_json::to_string(&topic_data).unwrap());
-                Some((Ok::<_, warp::Error>(event), rx))
-            }
-            Err(_) => None,
-        }
+async fn sse_handler(cache: TopicCache) -> Result<impl warp::Reply, warp::Rejection> {
+    let stream = futures::stream::unfold(cache, |cache| async move {
+        let mut interval = time::interval(Duration::from_millis(RELOAD_PERIOD_MS));
+        interval.tick().await;
+
+        // Read the latest cache
+        let snapshot: Vec<TopicData> = cache.read().await.values().cloned().collect();
+
+        let event = sse::Event::default()
+            .event("message")
+            .data(serde_json::to_string(&snapshot).unwrap());
+
+        Some((Ok::<_, warp::Error>(event), cache))
     });
 
     Ok(warp::sse::reply(warp::sse::keep_alive().stream(stream)))
 }
 
-async fn start_web_server(tx: broadcast::Sender<TopicData>) {
-    let tx_filter = tx.clone();
+async fn start_web_server(cache: TopicCache) {
+    let cache_filter = warp::any().map(move || cache.clone());
 
     let index = warp::path::end()
         .map(|| warp::reply::html(generate_html()))
         .boxed();
 
     let sse_route = warp::path("sse")
-        .map(move || tx_filter.subscribe())
-        .and_then(|rx: broadcast::Receiver<TopicData>| sse_handler(rx))
+        .and(cache_filter)
+        .and_then(sse_handler)
         .boxed();
 
     let routes = index.or(sse_route);
@@ -321,26 +356,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Starting Zenoh DDS Web Monitor...");
 
-    let (tx, _rx) = broadcast::channel(32);
-    let tx_server = tx.clone();
+    let topic_cache: TopicCache = Arc::new(RwLock::new(HashMap::new()));
 
-    let subscriber_task = tokio::spawn(async move {
-        if let Err(e) = start_zenoh_subscriber(tx).await {
-            error!("Zenoh subscriber error: {}", e);
+    tokio::spawn({
+        let cache_clone = topic_cache.clone();
+        async move {
+            if let Err(e) = start_zenoh_subscriber(cache_clone).await {
+                error!("Zenoh subscriber error: {}", e);
+            }
         }
     });
 
-    let server_task = tokio::spawn(async move {
-        start_web_server(tx_server).await;
-    });
+    tokio::spawn(start_web_server(topic_cache.clone()));
 
-    tokio::select! {
-        _ = subscriber_task => warn!("Zenoh subscriber task completed"),
-        _ = server_task => warn!("Web server task completed"),
-        _ = tokio::signal::ctrl_c() => {
-            info!("CTRL-C received. Shutting down gracefully...");
-        }
-    }
+    tokio::signal::ctrl_c().await?;
 
     info!("Zenoh DDS Web Monitor stopped.");
 
