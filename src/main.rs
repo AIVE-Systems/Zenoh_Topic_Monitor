@@ -140,6 +140,11 @@ fn generate_html() -> String {
     table {{
         width: 100%;
         border-collapse: collapse;
+        /* --- MODIFIED --- */
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        /* --- END MODIFIED --- */
     }}
     thead {{
         display: table-header-group;
@@ -149,8 +154,9 @@ fn generate_html() -> String {
     tbody {{
         display: block;
         overflow-y: auto;
-        height: 100%;
-        width: 100%;
+        /* --- MODIFIED --- */
+        flex: 1 1 auto;
+        /* --- END MODIFIED --- */
     }}
     tr {{
         display: table;
