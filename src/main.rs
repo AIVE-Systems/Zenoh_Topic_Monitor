@@ -140,19 +140,17 @@ fn generate_html() -> String {
     table {{
         width: 100%;
         border-collapse: collapse;
-        display: flex;
-        flex-direction: column;
-        flex: 1 1 auto;
     }}
     thead {{
-        flex: 0 0 auto;
+        display: table-header-group;
         background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
         color: white;
     }}
     tbody {{
-        flex: 1 1 auto;
         display: block;
         overflow-y: auto;
+        height: 100%;
+        width: 100%;
     }}
     tr {{
         display: table;
@@ -248,15 +246,17 @@ document.addEventListener("DOMContentLoaded", function() {{
     const eventSource = new EventSource('/sse');
     const topics = new Map();
     const activeTopicsCount = document.querySelector('.stats .stat-value:first-child');
-    const lastUpdatedTime = document.querySelector('.stats .stat-value:last-child');
+    const lastUpdatedTime = document.getElementById('last-updated-value');
 
+    // Function to update the stats
     function updateStats() {{
         activeTopicsCount.textContent = topics.size;
         lastUpdatedTime.textContent = new Date().toLocaleTimeString();
     }}
 
+    // Function to update a row in the table
     function updateRow(topicData) {{
-        const rowId = `row-${{topicData.key_expr}}`;
+        const rowId = `row-${{topicData.key_expr.replace(/[^\w-]/g, '_')}}`;
         let row = document.getElementById(rowId);
         const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
 
@@ -273,32 +273,20 @@ document.addEventListener("DOMContentLoaded", function() {{
                 <td class="size-cell">${{topicData.last_data_size_bytes}}</td>
                 <td class="timestamp-cell">${{timestampReadable}}</td>
             `;
-
-            const sortedKeys = Array.from(topics.keys()).sort((a, b) => a.localeCompare(b));
-            const newIndex = sortedKeys.indexOf(topicData.key_expr);
-            const nextKey = sortedKeys[newIndex + 1];
-
-            if (nextKey) {{
-                const nextRow = document.getElementById(`row-${{nextKey}}`);
-                if (nextRow) {{
-                    tableBody.insertBefore(row, nextRow);
-                }} else {{
-                    tableBody.appendChild(row);
-                }}
-            }} else {{
-                tableBody.appendChild(row);
-            }}
+            tableBody.appendChild(row);
         }}
     }}
 
+    // Function to remove a row from the table
     function removeRow(topicKey) {{
-        const rowId = `row-${{topicKey}}`;
+        const rowId = `row-${{topicKey.replace(/[^\w-]/g, '_')}}`;
         const row = document.getElementById(rowId);
         if (row) {{
             row.remove();
         }}
     }}
 
+    // Event listener for Server-Sent Events
     eventSource.addEventListener("message", function(event) {{
         const delta = JSON.parse(event.data);
 
@@ -311,9 +299,13 @@ document.addEventListener("DOMContentLoaded", function() {{
             topics.delete(topicKey);
             removeRow(topicKey);
         }});
-
-        updateStats();
     }});
+
+    // Initial call to set the time immediately
+    updateStats();
+
+    // Set a recurring interval to update the stats every second
+    setInterval(updateStats, 1000);
 }});
 </script>
 
@@ -326,10 +318,10 @@ document.addEventListener("DOMContentLoaded", function() {{
 <div class="stats">
     <div class="stat-item">
         <span class="stat-value">0</span>
-        <span class="stat-label">Active Topics</span>
+        <span class="stat-label">Topics</span>
     </div>
     <div class="stat-item">
-        <span class="stat-value">{}</span>
+        <span class="stat-value" id="last-updated-value"></span>
         <span class="stat-label">Last Updated</span>
     </div>
 </div>
@@ -343,12 +335,11 @@ document.addEventListener("DOMContentLoaded", function() {{
             </tr>
         </thead>
         <tbody> </tbody>
-    </table>
+        </table>
 </div>
 <div class="refresh-info"> 🔄 Updates every {}ms | Built with Zenoh + Rust + Warp </div>
 </body>
 </html>"#,
-        chrono::Utc::now().format("%H:%M:%S"),
         RELOAD_PERIOD_MS
     )
 }
@@ -356,32 +347,37 @@ document.addEventListener("DOMContentLoaded", function() {{
 async fn sse_handler(cache: TopicCache) -> Result<impl warp::Reply, warp::Rejection> {
     let stream = futures::stream::unfold(
         (cache, HashMap::<String, TopicData>::new()),
-        |(cache, last_snapshot)| async move {
-            let (updated, removed, new_last_snapshot) = {
+        |(cache, mut last_snapshot)| async move {
+            let (updated, removed) = {
                 let mut interval = time::interval(Duration::from_millis(RELOAD_PERIOD_MS));
                 interval.tick().await;
 
+                // The RwLockReadGuard is created here.
                 let current_cache = cache.read().await;
 
                 let mut updated: Vec<TopicData> = Vec::new();
                 let mut removed: Vec<String> = Vec::new();
 
-                let current_keys: HashSet<&String> = current_cache.keys().collect();
-                let last_keys: HashSet<&String> = last_snapshot.keys().collect();
+                let current_keys: HashSet<_> = current_cache.keys().collect();
+                let last_keys: HashSet<_> = last_snapshot.keys().collect();
 
+                // Find topics that are new or have updated data
                 for (key, value) in current_cache.iter() {
-                    if last_snapshot.get(key) != Some(value) {
+                    if !last_keys.contains(key) || last_snapshot.get(key) != Some(value) {
                         updated.push(value.clone());
                     }
                 }
 
+                // Find topics that have been removed
                 for key in last_keys.difference(&current_keys) {
                     removed.push(key.to_string());
                 }
 
-                let new_last_snapshot = current_cache.clone();
+                // Update the last_snapshot for the next iteration
+                last_snapshot.clear();
+                last_snapshot.extend(current_cache.clone());
 
-                (updated, removed, new_last_snapshot)
+                (updated, removed)
             };
 
             let delta = DeltaUpdate { updated, removed };
@@ -390,7 +386,7 @@ async fn sse_handler(cache: TopicCache) -> Result<impl warp::Reply, warp::Reject
                 .event("message")
                 .data(serde_json::to_string(&delta).unwrap());
 
-            Some((Ok::<_, warp::Error>(event), (cache, new_last_snapshot)))
+            Some((Ok::<_, warp::Error>(event), (cache, last_snapshot)))
         },
     );
 
