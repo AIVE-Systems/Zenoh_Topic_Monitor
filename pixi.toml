@@ -1,0 +1,12 @@
+[workspace]
+authors = ["Toby Godfrey <t.godfrey@soton.ac.uk>"]
+channels = ["conda-forge"]
+name = "zenoh_topic_viewer"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+server = "cargo run --release"
+
+[dependencies]
+rust = ">=1.89.0,<1.90"
