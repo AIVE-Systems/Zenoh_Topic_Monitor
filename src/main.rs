@@ -19,13 +19,14 @@ const LOG_LEVEL: log::LevelFilter = LevelFilter::Warn;
 const PORT: u16 = 8080;
 const RELOAD_PERIOD_MS: u64 = 1000;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct TopicData {
     key_expr: String,
     last_data_size_bytes: u64,
     received_timestamp: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     decoded_content: Option<String>,
+    estimated_hz: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,6 +38,9 @@ struct DeltaUpdate {
 }
 
 type TopicCache = Arc<RwLock<HashMap<String, TopicData>>>;
+
+const WINDOW_SIZE: usize = 20;
+type IntervalHistory = Arc<RwLock<HashMap<String, (u64, Vec<u64>)>>>;
 
 fn get_timestamp() -> u64 {
     SystemTime::now()
@@ -51,7 +55,8 @@ fn html_escape_string(input: &str) -> String {
 }
 
 async fn start_zenoh_subscriber(
-    cache: TopicCache,
+    topic_cache: TopicCache,
+    interval_history: IntervalHistory,
     decoder: DecoderFn,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Opening Zenoh session...");
@@ -73,6 +78,33 @@ async fn start_zenoh_subscriber(
         let data_bytes = sample.payload().to_bytes().len() as u64;
         let timestamp = get_timestamp();
 
+        let mut history = interval_history.write().await;
+        let entry = history
+            .entry(key_expr.clone())
+            .or_insert((timestamp, Vec::new()));
+
+        // compute delta against last timestamp
+        let last_ts = entry.0;
+        if timestamp > last_ts {
+            let delta = timestamp - last_ts;
+            entry.1.push(delta);
+            if entry.1.len() > WINDOW_SIZE {
+                entry.1.remove(0);
+            }
+        }
+        entry.0 = timestamp; // update last seen timestamp
+
+        let estimated_hz = if !entry.1.is_empty() {
+            let avg_delta = entry.1.iter().sum::<u64>() as f64 / entry.1.len() as f64;
+            if avg_delta > 0.0 {
+                1000.0 / avg_delta
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
         // Apply decoder if provided
         let decoded_content = decoder.map(|decode_fn| {
             let raw_decoded = decode_fn(sample.clone());
@@ -84,15 +116,19 @@ async fn start_zenoh_subscriber(
             last_data_size_bytes: data_bytes,
             received_timestamp: timestamp,
             decoded_content,
+            estimated_hz,
         };
 
         debug!("Received data for topic '{}'", key_expr);
-        cache.write().await.insert(key_expr, topic_data);
+        topic_cache.write().await.insert(key_expr, topic_data);
     }
 
     Ok(())
 }
 
+/// Generate HTML for the web UI.
+/// `has_decoder`: whether to include the decoded-content column.
+/// Returns the full HTML page as a `String`.
 fn generate_html(has_decoder: bool) -> String {
     let decoder_column_header = if has_decoder {
         "<th>Decoded Content</th>"
@@ -100,10 +136,17 @@ fn generate_html(has_decoder: bool) -> String {
         ""
     };
 
-    let topic_column_width = if has_decoder { "30%" } else { "80%" };
-    let size_column_width = if has_decoder { "5%" } else { "5%" };
-    let timestamp_column_width = if has_decoder { "15%" } else { "15%" };
-    let decoder_column_width = if has_decoder { "50%" } else { "0%" };
+    // let topic_column_width = if has_decoder { "25%" } else { "75%" };
+    // let size_column_width = if has_decoder { "5%" } else { "5%" };
+    // let freq_column_width = if has_decoder { "5%" } else { "5%" };
+    // let timestamp_column_width = if has_decoder { "15%" } else { "15%" };
+    // let decoder_column_width = if has_decoder { "50%" } else { "0%" };
+
+    let topic_column_width = "25%";
+    let size_column_width = "5%";
+    let freq_column_width = "7%";
+    let timestamp_column_width = "18%";
+    let decoder_column_width = if has_decoder { "45%" } else { "0%" };
 
     format!(
         r#"<!DOCTYPE html>
@@ -149,9 +192,15 @@ fn generate_html(has_decoder: bool) -> String {
         justify-content: space-between;
         align-items: center;
         flex-shrink: 0;
+        gap: 12px;
     }}
     .stat-item {{
+        /* Keep items stacked (control on top, label/value under) and centred */
         text-align: center;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
     }}
     .stat-value {{
         font-size: 2rem;
@@ -162,6 +211,57 @@ fn generate_html(has_decoder: bool) -> String {
         font-size: 0.9rem;
         opacity: 0.9;
     }}
+    .controls {{
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 15px;
+        margin-bottom: 20px;
+        flex-shrink: 0;
+    }}
+    .sort-toggle {{
+        background: linear-gradient(135deg, #e17055 0%, #d63031 100%);
+        color: white;
+        border: none;
+        padding: 12px 20px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        font-weight: 600;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        transition: all 0.3s ease;
+        min-width: 180px;
+    }}
+    .sort-toggle:hover {{
+        transform: translateY(-2px);
+        box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+    }}
+    .sort-toggle:active {{
+        transform: translateY(0);
+    }}
+
+    /* Improved search input look */
+    .filter-input {{
+        padding: 8px 12px;
+        border: 1px solid rgba(0,0,0,0.12);
+        border-radius: 10px;
+        font-size: 0.95rem;
+        min-width: 220px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+        transition: box-shadow 0.15s ease, transform 0.08s ease, border-color 0.15s ease;
+        background: white;
+        color: #333;
+    }}
+    .filter-input::placeholder {{
+        color: #9aa4b2;
+    }}
+    .filter-input:focus {{
+        outline: none;
+        box-shadow: 0 6px 18px rgba(102,126,234,0.12);
+        transform: translateY(-1px);
+        border-color: rgba(102,126,234,0.6);
+    }}
+
     .container {{
         flex: 1 1 auto;
         display: flex;
@@ -196,8 +296,9 @@ fn generate_html(has_decoder: bool) -> String {
     th {{
         background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
         color: white;
-        padding: 16px;
-        text-align: left;
+        padding: 8px 12px;
+        margin: 0;
+        text-align: centre;
         font-weight: 600;
         font-size: 0.95rem;
         text-transform: uppercase;
@@ -206,16 +307,19 @@ fn generate_html(has_decoder: bool) -> String {
     }}
     th:nth-child(1) {{ width: {topic_width}; }}
     th:nth-child(2) {{ width: {size_width}; }}
-    th:nth-child(3) {{ width: {timestamp_width}; }}
+    th:nth-child(3) {{ width: {freq_width}; }}
+    th:nth-child(4) {{ width: {timestamp_width}; }}
     {decoder_th_style}
     td {{
-        padding: 12px 16px;
+        padding: 8px 12px;
+        margin: 0;
         border-bottom: 1px solid #e8ecf0;
         vertical-align: top;
     }}
     td:nth-child(1) {{ width: {topic_width}; }}
     td:nth-child(2) {{ width: {size_width}; }}
-    td:nth-child(3) {{ width: {timestamp_width}; }}
+    td:nth-child(3) {{ width: {freq_width}; }}
+    td:nth-child(4) {{ width: {timestamp_width}; }}
     {decoder_td_style}
     tr:hover {{
         background-color: #f8f9fb;
@@ -227,30 +331,36 @@ fn generate_html(has_decoder: bool) -> String {
         color: #3498db;
         word-break: break-all;
         position: relative;
+        text-align: left;
+        border-radius: 4px;
     }}
     .size-cell {{
         font-family: 'Fira Code', 'Courier New', monospace;
         word-break: break-word;
         background-color: transparent;
         border-radius: 4px;
-        padding: 8px;
+    }}
+    .freq-cell {{
+        font-family: 'Fira Code', 'Courier New', monospace;
+        word-break: break-word;
+        background-color: transparent;
+        border-radius: 4px;
     }}
     .timestamp-cell {{
         font-family: 'Fira Code', 'Courier New', monospace;
         white-space: nowrap;
         background-color: transparent;
         border-radius: 4px;
-        padding: 8px;
     }}
     .decoded-cell {{
         font-family: 'Fira Code', 'Courier New', monospace;
         background-color: transparent;
         border-radius: 4px;
-        padding: 8px;
         max-height: 100px;
         overflow-y: auto;
         word-break: break-word;
         line-height: 1.3;
+        text-align: left;
     }}
     .refresh-info {{
         text-align: center;
@@ -282,6 +392,10 @@ fn generate_html(has_decoder: bool) -> String {
             flex-direction: column;
             gap: 15px;
         }}
+        .controls {{
+            flex-direction: column;
+            gap: 10px;
+        }}
         .topic-cell, .size-cell, .decoded-cell {{
             max-width: none;
         }}
@@ -292,6 +406,9 @@ fn generate_html(has_decoder: bool) -> String {
         .decoded-cell {{
             max-height: 80px;
         }}
+        .filter-input {{
+            min-width: 140px;
+        }}
     }}
 </style>
 <script>
@@ -299,26 +416,22 @@ document.addEventListener("DOMContentLoaded", function() {{
     const tableBody = document.querySelector('tbody');
     const eventSource = new EventSource('/sse');
     const topics = new Map();
-    const activeTopicsCount = document.querySelector('.stats .stat-value:first-child');
+
+    // Explicit IDs for robustness
+    const totalTopicsValue = document.getElementById('topic-count');
     const lastUpdatedTime = document.getElementById('last-updated-value');
+    const sortButton = document.getElementById('sort-toggle-btn');
+    const filterInput = document.getElementById('filter-input');
+    const filteredCount = document.getElementById('filtered-count');
     const hasDecoder = {has_decoder_js};
 
-    // updateStats(): updates topic count and last-updated display
+    let sortMode = 'alphabetical'; // 'alphabetical' or 'timestamp'
+
     function updateStats() {{
-        activeTopicsCount.textContent = topics.size;
+        totalTopicsValue.textContent = topics.size;
         lastUpdatedTime.textContent = new Date().toLocaleTimeString();
     }}
 
-    // escapeForSelector(s): return an escaped string safe for CSS selectors
-    function escapeForSelector(s) {{
-        if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {{
-            return CSS.escape(s);
-        }}
-        // escape " ' and backslash by prefixing with backslash
-        return s.replace(/["'\\]/g, '\\$&');
-    }}
-
-    // getRowByKey(topicKey): find a <tr> whose data-key matches topicKey
     function getRowByKey(topicKey) {{
         const rows = tableBody.querySelectorAll('tr');
         for (const r of rows) {{
@@ -327,52 +440,162 @@ document.addEventListener("DOMContentLoaded", function() {{
         return null;
     }}
 
-    // updateRow(topicData): insert or update a table row for the topic
-    function updateRow(topicData) {{
+    function sortTopics() {{
+        const topicArray = Array.from(topics.values());
+        if (sortMode === 'alphabetical') {{
+            topicArray.sort((a, b) => a.key_expr.localeCompare(b.key_expr));
+        }} else {{
+            topicArray.sort((a, b) => b.received_timestamp - a.received_timestamp);
+        }}
+        return topicArray;
+    }}
+
+    function applyFilter() {{
+        const filter = (filterInput.value || '').toLowerCase();
+        let count = 0;
+        const rows = tableBody.querySelectorAll('tr');
+        rows.forEach(row => {{
+            const topicCell = row.querySelector('.topic-cell');
+            if (topicCell && topicCell.textContent.toLowerCase().includes(filter)) {{
+                row.style.display = "";
+                count++;
+            }} else {{
+                row.style.display = "none";
+            }}
+        }});
+        filteredCount.textContent = `${{count}} Topics`;
+    }}
+
+    function rebuildTable() {{
+        tableBody.innerHTML = '';
+        sortTopics().forEach(topicData => createAndInsertRow(topicData));
+        applyFilter();
+    }}
+
+    function createAndInsertRow(topicData) {{
         const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
         const decodedContent = hasDecoder && topicData.decoded_content
             ? `<td class="decoded-cell">${{topicData.decoded_content}}</td>`
             : (hasDecoder ? '<td class="decoded-cell">-</td>' : '');
 
+        const row = document.createElement('tr');
+        row.dataset.key = topicData.key_expr;
+        row.dataset.timestamp = topicData.received_timestamp;
+        row.innerHTML = `
+            <td class="topic-cell">${{topicData.key_expr}}</td>
+            <td class="size-cell">${{topicData.last_data_size_bytes}}</td>
+            <td class="freq-cell">${{topicData.estimated_hz}}</td>
+            <td class="timestamp-cell">${{timestampReadable}}</td>
+            ${{decodedContent}}
+        `;
+        tableBody.appendChild(row);
+    }}
+
+    function updateRow(topicData) {{
+        const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
         let row = getRowByKey(topicData.key_expr);
 
         if (row) {{
-            row.querySelector('.size-cell').textContent = topicData.last_data_size_bytes;
+            row.querySelector('.size-cell').textContent = topicData.last_data_size_bytes ? topicData.last_data_size_bytes.toFixed(2) : "-";
+            row.querySelector('.freq-cell').textContent = topicData.estimated_hz ? topicData.estimated_hz.toFixed(2) : "-";
             row.querySelector('.timestamp-cell').textContent = timestampReadable;
+            row.dataset.timestamp = topicData.received_timestamp;
+
             if (hasDecoder) {{
                 const decodedCell = row.querySelector('.decoded-cell');
                 if (decodedCell) decodedCell.innerHTML = topicData.decoded_content || '-';
             }}
+
             row.classList.add('updated-row');
             setTimeout(() => row.classList.remove('updated-row'), 500);
+
+            if (sortMode === 'timestamp') {{
+                row.remove();
+                insertRowInOrder(row, topicData);
+            }}
         }} else {{
-            row = document.createElement('tr');
-            row.dataset.key = topicData.key_expr;
-            row.innerHTML = `
-                <td class="topic-cell">${{topicData.key_expr}}</td>
-                <td class="size-cell">${{topicData.last_data_size_bytes}}</td>
-                <td class="timestamp-cell">${{timestampReadable}}</td>
-                ${{decodedContent}}
-            `;
-            const existingRows = tableBody.querySelectorAll('tr');
-            let inserted = false;
-            for (const existingRow of existingRows) {{
-                const existingTopic = existingRow.querySelector('.topic-cell').textContent;
-                if (topicData.key_expr.localeCompare(existingTopic) < 0) {{
-                    tableBody.insertBefore(row, existingRow);
-                    inserted = true;
-                    break;
+            createAndInsertRow(topicData);
+
+            if (sortMode === 'alphabetical') {{
+                row = getRowByKey(topicData.key_expr);
+                if (row) {{
+                    row.remove();
+                    insertRowInOrder(row, topicData);
                 }}
             }}
-            if (!inserted) tableBody.appendChild(row);
+        }}
+
+        // Reapply filter so new/updated row respects search
+        applyFilter();
+    }}
+
+    function insertRowInOrder(row, topicData) {{
+        const existingRows = tableBody.querySelectorAll('tr');
+        let inserted = false;
+
+        for (const existingRow of existingRows) {{
+            let shouldInsertBefore = false;
+
+            if (sortMode === 'alphabetical') {{
+                const existingTopic = existingRow.querySelector('.topic-cell').textContent;
+                shouldInsertBefore = topicData.key_expr.localeCompare(existingTopic) < 0;
+            }} else {{
+                const existingTimestamp = parseInt(existingRow.dataset.timestamp || '0', 10);
+                shouldInsertBefore = topicData.received_timestamp > existingTimestamp;
+            }}
+
+            if (shouldInsertBefore) {{
+                tableBody.insertBefore(row, existingRow);
+                inserted = true;
+                break;
+            }}
+        }}
+
+        if (!inserted) {{
+            tableBody.appendChild(row);
         }}
     }}
 
-    // removeRow(topicKey): remove a row corresponding to topicKey
     function removeRow(topicKey) {{
         const row = getRowByKey(topicKey);
         if (row) row.remove();
+        applyFilter();
     }}
+
+    function toggleSort() {{
+        if (sortMode === 'alphabetical') {{
+            sortMode = 'timestamp';
+            sortButton.textContent = 'Sort: Most Recent First';
+        }} else {{
+            sortMode = 'alphabetical';
+            sortButton.textContent = 'Sort: Alphabetical';
+        }}
+
+        rebuildTable();
+    }}
+
+    function decayFrequencies() {{
+        const now = Date.now();
+        const rows = tableBody.querySelectorAll('tr');
+        rows.forEach(row => {{
+            const freqCell = row.querySelector('.freq-cell');
+            const lastTs = parseInt(row.dataset.timestamp || '0', 10);
+            if (freqCell && lastTs > 0) {{
+                const elapsed = now - lastTs;
+                if (elapsed > 5000) {{
+                    let currentHz = parseFloat(freqCell.textContent) || 0;
+                    // apply exponential decay factor for faster drop
+                    currentHz *= 0.5; // halve every tick (1s)
+                    freqCell.textContent = currentHz > 0.01 ? currentHz.toFixed(2) : "0.00";
+                }}
+            }}
+        }});
+    }}
+    setInterval(decayFrequencies, 1000);
+
+    // Event handlers
+    sortButton.addEventListener('click', toggleSort);
+    filterInput.addEventListener('input', applyFilter);
 
     eventSource.addEventListener("message", function(event) {{
         try {{
@@ -396,7 +619,9 @@ document.addEventListener("DOMContentLoaded", function() {{
         }}
     }});
 
+    // initial render state
     updateStats();
+    applyFilter();
 }});
 </script>
 </head>
@@ -407,9 +632,26 @@ document.addEventListener("DOMContentLoaded", function() {{
 </div>
 <div class="stats">
     <div class="stat-item">
-        <span class="stat-value">0</span>
+        <span class="stat-value" id="topic-count">0</span>
         <span class="stat-label">Topics</span>
     </div>
+
+    <div class="stat-item">
+        <button id="sort-toggle-btn" class="sort-toggle">Alphabetical</button>
+        <span class="stat-label">Sort Order</span>
+    </div>
+
+    <div class="stat-item">
+        <!-- Search box above the filtered count (no extra label) -->
+        <input
+            type="text"
+            id="filter-input"
+            class="filter-input"
+            placeholder="Filter topics..."
+        />
+        <span class="stat-label" id="filtered-count">0 Topics</span>
+    </div>
+
     <div class="stat-item">
         <span class="stat-value" id="last-updated-value"></span>
         <span class="stat-label">Last Updated</span>
@@ -421,6 +663,7 @@ document.addEventListener("DOMContentLoaded", function() {{
             <tr>
                 <th>Topic</th>
                 <th>Message Size (B)</th>
+                <th>Frequency (Hz)</th>
                 <th>Received Timestamp</th>
                 {decoder_header}
             </tr>
@@ -428,20 +671,21 @@ document.addEventListener("DOMContentLoaded", function() {{
         <tbody></tbody>
     </table>
 </div>
-<div class="refresh-info">🔄 Updates every {}ms | Built with Zenoh + Rust + Warp</div>
+<div class="refresh-info">📊 Updates every {}ms | Built with Zenoh + Rust + Warp</div>
 </body>
 </html>"#,
         RELOAD_PERIOD_MS,
         topic_width = topic_column_width,
         size_width = size_column_width,
+        freq_width = freq_column_width,
         timestamp_width = timestamp_column_width,
         decoder_th_style = if has_decoder {
-            format!("th:nth-child(4) {{ width: {}; }}", decoder_column_width)
+            format!("th:nth-child(5) {{ width: {}; }}", decoder_column_width)
         } else {
             String::new()
         },
         decoder_td_style = if has_decoder {
-            format!("td:nth-child(4) {{ width: {}; }}", decoder_column_width)
+            format!("td:nth-child(5) {{ width: {}; }}", decoder_column_width)
         } else {
             String::new()
         },
@@ -473,8 +717,20 @@ async fn sse_handler(
                 let current_keys: HashSet<_> = current_cache.keys().collect();
                 let last_keys: HashSet<_> = last_snapshot.keys().collect();
 
+                // for (key, value) in current_cache.iter() {
+                //     if !last_keys.contains(key) || last_snapshot.get(key) != Some(value) {
+                //         updated.push(value.clone());
+                //     }
+                // }
+
                 for (key, value) in current_cache.iter() {
-                    if !last_keys.contains(key) || last_snapshot.get(key) != Some(value) {
+                    let changed = match last_snapshot.get(key) {
+                        Some(old) => {
+                            old.received_timestamp != value.received_timestamp || old != value
+                        }
+                        None => true,
+                    };
+                    if changed {
                         updated.push(value.clone());
                     }
                 }
@@ -552,11 +808,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let topic_cache: TopicCache = Arc::new(RwLock::new(HashMap::new()));
+    let interval_history: IntervalHistory = Arc::new(RwLock::new(HashMap::new()));
 
     tokio::spawn({
         let cache_clone = topic_cache.clone();
         async move {
-            if let Err(e) = start_zenoh_subscriber(cache_clone, custom_decoder).await {
+            if let Err(e) =
+                start_zenoh_subscriber(cache_clone, interval_history, custom_decoder).await
+            {
                 error!("Zenoh subscriber error: {}", e);
             }
         }
