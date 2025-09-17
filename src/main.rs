@@ -1,5 +1,5 @@
 use ftail::Ftail;
-use log::{LevelFilter, error, info};
+use log::{LevelFilter, debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -67,7 +67,7 @@ async fn start_zenoh_subscriber(
         .await
         .map_err(|e| format!("Failed to declare subscriber: {}", e))?;
 
-    info!("Zenoh subscriber started, waiting for messages...");
+    info!("Zenoh subscriber started");
     while let Ok(sample) = subscriber.recv_async().await {
         let key_expr = sample.key_expr().as_str().to_string();
         let data_bytes = sample.payload().to_bytes().len() as u64;
@@ -86,7 +86,7 @@ async fn start_zenoh_subscriber(
             decoded_content,
         };
 
-        info!("Received data for topic '{}'", key_expr);
+        debug!("Received data for topic '{}'", key_expr);
         cache.write().await.insert(key_expr, topic_data);
     }
 
@@ -566,7 +566,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::signal::ctrl_c().await?;
 
-    info!("Zenoh DDS Web Monitor stopped.");
+    warn!("Zenoh DDS Web Monitor stopping.");
 
     Ok(())
 }
