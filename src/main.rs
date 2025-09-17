@@ -13,20 +13,20 @@ use zenoh::sample::Sample;
 mod decoder;
 
 type DecoderFn = Option<fn(Sample) -> String>;
-// const DECODER: DecoderFn = Some(decoder::simple_decoder); // Or None
-const DECODER: DecoderFn = None;
+const DECODER: DecoderFn = Some(decoder::simple_decoder); // Or None
 
 const LOG_LEVEL: log::LevelFilter = LevelFilter::Warn;
 const PORT: u16 = 8080;
 const RELOAD_PERIOD_MS: u64 = 1000;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct TopicData {
     key_expr: String,
     last_data_size_bytes: u64,
     received_timestamp: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     decoded_content: Option<String>,
+    estimated_hz: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,6 +38,9 @@ struct DeltaUpdate {
 }
 
 type TopicCache = Arc<RwLock<HashMap<String, TopicData>>>;
+
+const WINDOW_SIZE: usize = 20;
+type IntervalHistory = Arc<RwLock<HashMap<String, (u64, Vec<u64>)>>>;
 
 fn get_timestamp() -> u64 {
     SystemTime::now()
@@ -52,7 +55,8 @@ fn html_escape_string(input: &str) -> String {
 }
 
 async fn start_zenoh_subscriber(
-    cache: TopicCache,
+    topic_cache: TopicCache,
+    interval_history: IntervalHistory,
     decoder: DecoderFn,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Opening Zenoh session...");
@@ -74,6 +78,33 @@ async fn start_zenoh_subscriber(
         let data_bytes = sample.payload().to_bytes().len() as u64;
         let timestamp = get_timestamp();
 
+        let mut history = interval_history.write().await;
+        let entry = history
+            .entry(key_expr.clone())
+            .or_insert((timestamp, Vec::new()));
+
+        // compute delta against last timestamp
+        let last_ts = entry.0;
+        if timestamp > last_ts {
+            let delta = timestamp - last_ts;
+            entry.1.push(delta);
+            if entry.1.len() > WINDOW_SIZE {
+                entry.1.remove(0);
+            }
+        }
+        entry.0 = timestamp; // update last seen timestamp
+
+        let estimated_hz = if !entry.1.is_empty() {
+            let avg_delta = entry.1.iter().sum::<u64>() as f64 / entry.1.len() as f64;
+            if avg_delta > 0.0 {
+                1000.0 / avg_delta
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
         // Apply decoder if provided
         let decoded_content = decoder.map(|decode_fn| {
             let raw_decoded = decode_fn(sample.clone());
@@ -85,10 +116,11 @@ async fn start_zenoh_subscriber(
             last_data_size_bytes: data_bytes,
             received_timestamp: timestamp,
             decoded_content,
+            estimated_hz,
         };
 
         debug!("Received data for topic '{}'", key_expr);
-        cache.write().await.insert(key_expr, topic_data);
+        topic_cache.write().await.insert(key_expr, topic_data);
     }
 
     Ok(())
@@ -104,10 +136,17 @@ fn generate_html(has_decoder: bool) -> String {
         ""
     };
 
-    let topic_column_width = if has_decoder { "30%" } else { "80%" };
-    let size_column_width = if has_decoder { "5%" } else { "5%" };
-    let timestamp_column_width = if has_decoder { "15%" } else { "15%" };
-    let decoder_column_width = if has_decoder { "50%" } else { "0%" };
+    // let topic_column_width = if has_decoder { "25%" } else { "75%" };
+    // let size_column_width = if has_decoder { "5%" } else { "5%" };
+    // let freq_column_width = if has_decoder { "5%" } else { "5%" };
+    // let timestamp_column_width = if has_decoder { "15%" } else { "15%" };
+    // let decoder_column_width = if has_decoder { "50%" } else { "0%" };
+
+    let topic_column_width = "25%";
+    let size_column_width = "5%";
+    let freq_column_width = "7%";
+    let timestamp_column_width = "18%";
+    let decoder_column_width = if has_decoder { "45%" } else { "0%" };
 
     format!(
         r#"<!DOCTYPE html>
@@ -267,7 +306,8 @@ fn generate_html(has_decoder: bool) -> String {
     }}
     th:nth-child(1) {{ width: {topic_width}; }}
     th:nth-child(2) {{ width: {size_width}; }}
-    th:nth-child(3) {{ width: {timestamp_width}; }}
+    th:nth-child(3) {{ width: {freq_width}; }}
+    th:nth-child(4) {{ width: {timestamp_width}; }}
     {decoder_th_style}
     td {{
         padding: 12px 16px;
@@ -276,7 +316,8 @@ fn generate_html(has_decoder: bool) -> String {
     }}
     td:nth-child(1) {{ width: {topic_width}; }}
     td:nth-child(2) {{ width: {size_width}; }}
-    td:nth-child(3) {{ width: {timestamp_width}; }}
+    td:nth-child(3) {{ width: {freq_width}; }}
+    td:nth-child(4) {{ width: {timestamp_width}; }}
     {decoder_td_style}
     tr:hover {{
         background-color: #f8f9fb;
@@ -290,6 +331,13 @@ fn generate_html(has_decoder: bool) -> String {
         position: relative;
     }}
     .size-cell {{
+        font-family: 'Fira Code', 'Courier New', monospace;
+        word-break: break-word;
+        background-color: transparent;
+        border-radius: 4px;
+        padding: 8px;
+    }}
+    .freq-cell {{
         font-family: 'Fira Code', 'Courier New', monospace;
         word-break: break-word;
         background-color: transparent;
@@ -435,6 +483,7 @@ document.addEventListener("DOMContentLoaded", function() {{
         row.innerHTML = `
             <td class="topic-cell">${{topicData.key_expr}}</td>
             <td class="size-cell">${{topicData.last_data_size_bytes}}</td>
+            <td class="freq-cell">${{topicData.estimated_hz}}</td>
             <td class="timestamp-cell">${{timestampReadable}}</td>
             ${{decodedContent}}
         `;
@@ -446,7 +495,8 @@ document.addEventListener("DOMContentLoaded", function() {{
         let row = getRowByKey(topicData.key_expr);
 
         if (row) {{
-            row.querySelector('.size-cell').textContent = topicData.last_data_size_bytes;
+            row.querySelector('.size-cell').textContent = topicData.last_data_size_bytes ? topicData.last_data_size_bytes.toFixed(2) : "-";
+            row.querySelector('.freq-cell').textContent = topicData.estimated_hz ? topicData.estimated_hz.toFixed(2) : "-";
             row.querySelector('.timestamp-cell').textContent = timestampReadable;
             row.dataset.timestamp = topicData.received_timestamp;
 
@@ -593,6 +643,7 @@ document.addEventListener("DOMContentLoaded", function() {{
             <tr>
                 <th>Topic</th>
                 <th>Message Size (B)</th>
+                <th>Frequency (Hz)</th>
                 <th>Received Timestamp</th>
                 {decoder_header}
             </tr>
@@ -606,14 +657,15 @@ document.addEventListener("DOMContentLoaded", function() {{
         RELOAD_PERIOD_MS,
         topic_width = topic_column_width,
         size_width = size_column_width,
+        freq_width = freq_column_width,
         timestamp_width = timestamp_column_width,
         decoder_th_style = if has_decoder {
-            format!("th:nth-child(4) {{ width: {}; }}", decoder_column_width)
+            format!("th:nth-child(5) {{ width: {}; }}", decoder_column_width)
         } else {
             String::new()
         },
         decoder_td_style = if has_decoder {
-            format!("td:nth-child(4) {{ width: {}; }}", decoder_column_width)
+            format!("td:nth-child(5) {{ width: {}; }}", decoder_column_width)
         } else {
             String::new()
         },
@@ -645,8 +697,20 @@ async fn sse_handler(
                 let current_keys: HashSet<_> = current_cache.keys().collect();
                 let last_keys: HashSet<_> = last_snapshot.keys().collect();
 
+                // for (key, value) in current_cache.iter() {
+                //     if !last_keys.contains(key) || last_snapshot.get(key) != Some(value) {
+                //         updated.push(value.clone());
+                //     }
+                // }
+
                 for (key, value) in current_cache.iter() {
-                    if !last_keys.contains(key) || last_snapshot.get(key) != Some(value) {
+                    let changed = match last_snapshot.get(key) {
+                        Some(old) => {
+                            old.received_timestamp != value.received_timestamp || old != value
+                        }
+                        None => true,
+                    };
+                    if changed {
                         updated.push(value.clone());
                     }
                 }
@@ -724,11 +788,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let topic_cache: TopicCache = Arc::new(RwLock::new(HashMap::new()));
+    let interval_history: IntervalHistory = Arc::new(RwLock::new(HashMap::new()));
 
     tokio::spawn({
         let cache_clone = topic_cache.clone();
         async move {
-            if let Err(e) = start_zenoh_subscriber(cache_clone, custom_decoder).await {
+            if let Err(e) =
+                start_zenoh_subscriber(cache_clone, interval_history, custom_decoder).await
+            {
                 error!("Zenoh subscriber error: {}", e);
             }
         }
