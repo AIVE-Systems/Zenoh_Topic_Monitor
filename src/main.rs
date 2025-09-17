@@ -296,8 +296,9 @@ fn generate_html(has_decoder: bool) -> String {
     th {{
         background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
         color: white;
-        padding: 16px;
-        text-align: left;
+        padding: 8px 12px;
+        margin: 0;
+        text-align: centre;
         font-weight: 600;
         font-size: 0.95rem;
         text-transform: uppercase;
@@ -310,7 +311,8 @@ fn generate_html(has_decoder: bool) -> String {
     th:nth-child(4) {{ width: {timestamp_width}; }}
     {decoder_th_style}
     td {{
-        padding: 12px 16px;
+        padding: 8px 12px;
+        margin: 0;
         border-bottom: 1px solid #e8ecf0;
         vertical-align: top;
     }}
@@ -329,37 +331,36 @@ fn generate_html(has_decoder: bool) -> String {
         color: #3498db;
         word-break: break-all;
         position: relative;
+        text-align: left;
+        border-radius: 4px;
     }}
     .size-cell {{
         font-family: 'Fira Code', 'Courier New', monospace;
         word-break: break-word;
         background-color: transparent;
         border-radius: 4px;
-        padding: 8px;
     }}
     .freq-cell {{
         font-family: 'Fira Code', 'Courier New', monospace;
         word-break: break-word;
         background-color: transparent;
         border-radius: 4px;
-        padding: 8px;
     }}
     .timestamp-cell {{
         font-family: 'Fira Code', 'Courier New', monospace;
         white-space: nowrap;
         background-color: transparent;
         border-radius: 4px;
-        padding: 8px;
     }}
     .decoded-cell {{
         font-family: 'Fira Code', 'Courier New', monospace;
         background-color: transparent;
         border-radius: 4px;
-        padding: 8px;
         max-height: 100px;
         overflow-y: auto;
         word-break: break-word;
         line-height: 1.3;
+        text-align: left;
     }}
     .refresh-info {{
         text-align: center;
