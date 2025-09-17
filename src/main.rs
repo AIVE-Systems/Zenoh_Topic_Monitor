@@ -8,6 +8,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::time::{self, Duration};
 use warp::{Filter, sse};
+use zenoh::sample::Sample;
+
+mod decoder;
+
+type DecoderFn = Option<fn(Sample) -> String>;
+const DECODER: DecoderFn = None; // Or Some(decoder::decoder);
 
 const LOG_LEVEL: log::LevelFilter = LevelFilter::Info;
 const PORT: u16 = 8080;
@@ -18,6 +24,8 @@ struct TopicData {
     key_expr: String,
     last_data_size_bytes: u64,
     received_timestamp: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decoded_content: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,7 +45,15 @@ fn get_timestamp() -> u64 {
         .as_millis() as u64
 }
 
-async fn start_zenoh_subscriber(cache: TopicCache) -> Result<(), Box<dyn std::error::Error>> {
+/// Converts a string to HTML-compliant format by escaping special characters
+fn html_escape_string(input: &str) -> String {
+    html_escape::encode_text(input).to_string()
+}
+
+async fn start_zenoh_subscriber(
+    cache: TopicCache,
+    decoder: DecoderFn,
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("Opening Zenoh session...");
     let mut config = zenoh::Config::default();
     config
@@ -57,26 +73,44 @@ async fn start_zenoh_subscriber(cache: TopicCache) -> Result<(), Box<dyn std::er
         let data_bytes = sample.payload().to_bytes().len() as u64;
         let timestamp = get_timestamp();
 
+        // Apply decoder if provided
+        let decoded_content = decoder.map(|decode_fn| {
+            let raw_decoded = decode_fn(sample.clone());
+            html_escape_string(&raw_decoded)
+        });
+
         let topic_data = TopicData {
             key_expr: key_expr.clone(),
             last_data_size_bytes: data_bytes,
             received_timestamp: timestamp,
+            decoded_content,
         };
-        info!("Received data for topic '{}'", key_expr);
 
+        info!("Received data for topic '{}'", key_expr);
         cache.write().await.insert(key_expr, topic_data);
     }
 
     Ok(())
 }
 
-fn generate_html() -> String {
+fn generate_html(has_decoder: bool) -> String {
+    let decoder_column_header = if has_decoder {
+        "<th>Decoded Content</th>"
+    } else {
+        ""
+    };
+
+    let topic_column_width = if has_decoder { "30%" } else { "80%" };
+    let size_column_width = if has_decoder { "5%" } else { "5%" };
+    let timestamp_column_width = if has_decoder { "15%" } else { "15%" };
+    let decoder_column_width = if has_decoder { "50%" } else { "0%" };
+
     format!(
         r#"<!DOCTYPE html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-<meta charset=\"UTF-8\">
-<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Zenoh DDS Topic Monitor</title>
 <style>
     body {{
@@ -170,11 +204,19 @@ fn generate_html() -> String {
         letter-spacing: 0.5px;
         border-bottom: 1px solid #e8ecf0;
     }}
+    th:nth-child(1) {{ width: {topic_width}; }}
+    th:nth-child(2) {{ width: {size_width}; }}
+    th:nth-child(3) {{ width: {timestamp_width}; }}
+    {decoder_th_style}
     td {{
         padding: 12px 16px;
         border-bottom: 1px solid #e8ecf0;
         vertical-align: top;
     }}
+    td:nth-child(1) {{ width: {topic_width}; }}
+    td:nth-child(2) {{ width: {size_width}; }}
+    td:nth-child(3) {{ width: {timestamp_width}; }}
+    {decoder_td_style}
     tr:hover {{
         background-color: #f8f9fb;
         transition: background-color 0.2s ease;
@@ -183,13 +225,11 @@ fn generate_html() -> String {
         font-family: 'Fira Code', 'Courier New', monospace;
         font-weight: 600;
         color: #3498db;
-        max-width: 350px;
         word-break: break-all;
         position: relative;
     }}
     .size-cell {{
         font-family: 'Fira Code', 'Courier New', monospace;
-        max-width: 450px;
         word-break: break-word;
         background-color: #f8f9fa;
         border-radius: 4px;
@@ -201,7 +241,17 @@ fn generate_html() -> String {
         font-size: 0.85rem;
         color: #6c757d;
         white-space: nowrap;
-        min-width: 180px;
+    }}
+    .decoded-cell {{
+        font-family: 'Fira Code', 'Courier New', monospace;
+        font-size: 0.85rem;
+        background-color: #f8f9fa;
+        border-radius: 4px;
+        padding: 8px;
+        max-height: 100px;
+        overflow-y: auto;
+        word-break: break-word;
+        line-height: 1.3;
     }}
     .refresh-info {{
         text-align: center;
@@ -233,12 +283,15 @@ fn generate_html() -> String {
             flex-direction: column;
             gap: 15px;
         }}
-        .topic-cell, .size-cell {{
+        .topic-cell, .size-cell, .decoded-cell {{
             max-width: none;
         }}
         th, td {{
             padding: 10px 8px;
             font-size: 0.9rem;
+        }}
+        .decoded-cell {{
+            max-height: 80px;
         }}
     }}
 </style>
@@ -249,34 +302,41 @@ document.addEventListener("DOMContentLoaded", function() {{
     const topics = new Map();
     const activeTopicsCount = document.querySelector('.stats .stat-value:first-child');
     const lastUpdatedTime = document.getElementById('last-updated-value');
+    const hasDecoder = {has_decoder_js};
 
-    // Function to update the stats
     function updateStats() {{
         activeTopicsCount.textContent = topics.size;
         lastUpdatedTime.textContent = new Date().toLocaleTimeString();
     }}
 
-    // --- MODIFIED FUNCTION ---
-    // This function now handles both updates and sorted insertions.
     function updateRow(topicData) {{
         const rowId = `row-${{topicData.key_expr.replace(/[^\w-]/g, '_')}}`;
         let row = document.getElementById(rowId);
         const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
 
+        const decodedContent = hasDecoder && topicData.decoded_content
+            ? `<td class="decoded-cell">${{topicData.decoded_content}}</td>`
+            : (hasDecoder ? '<td class="decoded-cell">-</td>' : '');
+
         if (row) {{
-            // Row exists, just update its content.
             row.querySelector('.size-cell').textContent = topicData.last_data_size_bytes;
             row.querySelector('.timestamp-cell').textContent = timestampReadable;
+            if (hasDecoder) {{
+                const decodedCell = row.querySelector('.decoded-cell');
+                if (decodedCell) {{
+                    decodedCell.innerHTML = topicData.decoded_content || '-';
+                }}
+            }}
             row.classList.add('updated-row');
             setTimeout(() => row.classList.remove('updated-row'), 500);
         }} else {{
-            // Row is new, create it and insert it into the correct sorted position.
             row = document.createElement('tr');
             row.id = rowId;
             row.innerHTML = `
                 <td class="topic-cell">${{topicData.key_expr}}</td>
                 <td class="size-cell">${{topicData.last_data_size_bytes}}</td>
                 <td class="timestamp-cell">${{timestampReadable}}</td>
+                ${{decodedContent}}
             `;
 
             const existingRows = tableBody.querySelectorAll('tr');
@@ -291,14 +351,11 @@ document.addEventListener("DOMContentLoaded", function() {{
             }}
 
             if (!inserted) {{
-                // If the new topic is alphabetically last, or the table is empty.
                 tableBody.appendChild(row);
             }}
         }}
     }}
-    // --- END MODIFIED FUNCTION ---
 
-    // Function to remove a row from the table
     function removeRow(topicKey) {{
         const rowId = `row-${{topicKey.replace(/[^\w-]/g, '_')}}`;
         const row = document.getElementById(rowId);
@@ -307,7 +364,6 @@ document.addEventListener("DOMContentLoaded", function() {{
         }}
     }}
 
-    // Event listener for Server-Sent Events
     eventSource.addEventListener("message", function(event) {{
         const delta = JSON.parse(event.data);
 
@@ -320,14 +376,9 @@ document.addEventListener("DOMContentLoaded", function() {{
             topics.delete(topicKey);
             removeRow(topicKey);
         }});
-
-        // No longer need to call sortTable() here.
     }});
 
-    // Initial call to set the time immediately
     updateStats();
-
-    // Set a recurring interval to update the stats every second
     setInterval(updateStats, 1000);
 }});
 </script>
@@ -336,7 +387,7 @@ document.addEventListener("DOMContentLoaded", function() {{
 <body>
 <div class="header">
     <h1>Zenoh DDS Monitor</h1>
-    <p>Real-time topic monitoring</p>
+    <p>Real-time topic monitoring{decoder_subtitle}</p>
 </div>
 <div class="stats">
     <div class="stat-item">
@@ -348,26 +399,50 @@ document.addEventListener("DOMContentLoaded", function() {{
         <span class="stat-label">Last Updated</span>
     </div>
 </div>
-    <div class="container">
+<div class="container">
     <table>
         <thead>
             <tr>
-            <th>Topic</th>
-            <th>Latest Message Data Size (B)</th>
-            <th>Received Timestamp</th>
+                <th>Topic</th>
+                <th>Message Size (B)</th>
+                <th>Received Timestamp</th>
+                {decoder_header}
             </tr>
         </thead>
-        <tbody> </tbody>
-        </table>
+        <tbody></tbody>
+    </table>
 </div>
-<div class="refresh-info"> 🔄 Updates every {}ms | Built with Zenoh + Rust + Warp </div>
+<div class="refresh-info">🔄 Updates every {}ms | Built with Zenoh + Rust + Warp</div>
 </body>
 </html>"#,
-        RELOAD_PERIOD_MS
+        RELOAD_PERIOD_MS,
+        topic_width = topic_column_width,
+        size_width = size_column_width,
+        timestamp_width = timestamp_column_width,
+        decoder_th_style = if has_decoder {
+            format!("th:nth-child(4) {{ width: {}; }}", decoder_column_width)
+        } else {
+            String::new()
+        },
+        decoder_td_style = if has_decoder {
+            format!("td:nth-child(4) {{ width: {}; }}", decoder_column_width)
+        } else {
+            String::new()
+        },
+        has_decoder_js = if has_decoder { "true" } else { "false" },
+        decoder_subtitle = if has_decoder {
+            " with custom decoder"
+        } else {
+            ""
+        },
+        decoder_header = decoder_column_header,
     )
 }
 
-async fn sse_handler(cache: TopicCache) -> Result<impl warp::Reply, warp::Rejection> {
+async fn sse_handler(
+    cache: TopicCache,
+    _has_decoder: bool,
+) -> Result<impl warp::Reply, warp::Rejection> {
     let stream = futures::stream::unfold(
         (cache, HashMap::<String, TopicData>::new()),
         |(cache, mut last_snapshot)| async move {
@@ -375,28 +450,23 @@ async fn sse_handler(cache: TopicCache) -> Result<impl warp::Reply, warp::Reject
                 let mut interval = time::interval(Duration::from_millis(RELOAD_PERIOD_MS));
                 interval.tick().await;
 
-                // The RwLockReadGuard is created here.
                 let current_cache = cache.read().await;
-
                 let mut updated: Vec<TopicData> = Vec::new();
                 let mut removed: Vec<String> = Vec::new();
 
                 let current_keys: HashSet<_> = current_cache.keys().collect();
                 let last_keys: HashSet<_> = last_snapshot.keys().collect();
 
-                // Find topics that are new or have updated data
                 for (key, value) in current_cache.iter() {
                     if !last_keys.contains(key) || last_snapshot.get(key) != Some(value) {
                         updated.push(value.clone());
                     }
                 }
 
-                // Find topics that have been removed
                 for key in last_keys.difference(&current_keys) {
                     removed.push(key.to_string());
                 }
 
-                // Update the last_snapshot for the next iteration
                 last_snapshot.clear();
                 last_snapshot.extend(current_cache.clone());
 
@@ -416,15 +486,18 @@ async fn sse_handler(cache: TopicCache) -> Result<impl warp::Reply, warp::Reject
     Ok(warp::sse::reply(warp::sse::keep_alive().stream(stream)))
 }
 
-async fn start_web_server(cache: TopicCache) {
+async fn start_web_server(cache: TopicCache, has_decoder: bool) {
     let cache_filter = warp::any().map(move || cache.clone());
+    let decoder_filter = warp::any().map(move || has_decoder);
 
     let index = warp::path::end()
-        .map(|| warp::reply::html(generate_html()))
+        .and(decoder_filter)
+        .map(|has_decoder| warp::reply::html(generate_html(has_decoder)))
         .boxed();
 
     let sse_route = warp::path("sse")
         .and(cache_filter)
+        .and(decoder_filter)
         .and_then(sse_handler)
         .boxed();
 
@@ -451,18 +524,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Starting Zenoh DDS Web Monitor...");
 
+    // Determine if decoder should be used
+    // Change this to Some(decoder) to enable the custom decoder
+    let custom_decoder: DecoderFn = DECODER; // or Some(decoder)
+    let has_decoder = custom_decoder.is_some();
+
+    if has_decoder {
+        info!("Custom decoder enabled");
+    } else {
+        info!("Running in standard mode (no custom decoder)");
+    }
+
     let topic_cache: TopicCache = Arc::new(RwLock::new(HashMap::new()));
 
     tokio::spawn({
         let cache_clone = topic_cache.clone();
         async move {
-            if let Err(e) = start_zenoh_subscriber(cache_clone).await {
+            if let Err(e) = start_zenoh_subscriber(cache_clone, custom_decoder).await {
                 error!("Zenoh subscriber error: {}", e);
             }
         }
     });
 
-    tokio::spawn(start_web_server(topic_cache.clone()));
+    tokio::spawn(start_web_server(topic_cache.clone(), has_decoder));
 
     tokio::signal::ctrl_c().await?;
 
