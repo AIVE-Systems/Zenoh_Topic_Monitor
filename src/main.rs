@@ -573,6 +573,25 @@ document.addEventListener("DOMContentLoaded", function() {{
         rebuildTable();
     }}
 
+    function decayFrequencies() {{
+        const now = Date.now();
+        const rows = tableBody.querySelectorAll('tr');
+        rows.forEach(row => {{
+            const freqCell = row.querySelector('.freq-cell');
+            const lastTs = parseInt(row.dataset.timestamp || '0', 10);
+            if (freqCell && lastTs > 0) {{
+                const elapsed = now - lastTs;
+                if (elapsed > 5000) {{
+                    let currentHz = parseFloat(freqCell.textContent) || 0;
+                    // apply exponential decay factor for faster drop
+                    currentHz *= 0.5; // halve every tick (1s)
+                    freqCell.textContent = currentHz > 0.01 ? currentHz.toFixed(2) : "0.00";
+                }}
+            }}
+        }});
+    }}
+    setInterval(decayFrequencies, 1000);
+
     // Event handlers
     sortButton.addEventListener('click', toggleSort);
     filterInput.addEventListener('input', applyFilter);
