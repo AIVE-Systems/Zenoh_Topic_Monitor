@@ -15,7 +15,7 @@ mod decoder;
 type DecoderFn = Option<fn(Sample) -> String>;
 const DECODER: DecoderFn = Some(decoder::decoder); // Or None;
 
-const LOG_LEVEL: log::LevelFilter = LevelFilter::Info;
+const LOG_LEVEL: log::LevelFilter = LevelFilter::Warn;
 const PORT: u16 = 8080;
 const RELOAD_PERIOD_MS: u64 = 1000;
 
