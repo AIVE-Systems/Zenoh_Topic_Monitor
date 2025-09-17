@@ -13,7 +13,8 @@ use zenoh::sample::Sample;
 mod decoder;
 
 type DecoderFn = Option<fn(Sample) -> String>;
-const DECODER: DecoderFn = Some(decoder::decoder); // Or None;
+// const DECODER: DecoderFn = Some(decoder::simple_decoder); // Or None
+const DECODER: DecoderFn = None;
 
 const LOG_LEVEL: log::LevelFilter = LevelFilter::Warn;
 const PORT: u16 = 8080;
@@ -93,6 +94,9 @@ async fn start_zenoh_subscriber(
     Ok(())
 }
 
+/// Generate HTML for the web UI.
+/// `has_decoder`: whether to include the decoded-content column.
+/// Returns the full HTML page as a `String`.
 fn generate_html(has_decoder: bool) -> String {
     let decoder_column_header = if has_decoder {
         "<th>Decoded Content</th>"
@@ -149,9 +153,15 @@ fn generate_html(has_decoder: bool) -> String {
         justify-content: space-between;
         align-items: center;
         flex-shrink: 0;
+        gap: 12px;
     }}
     .stat-item {{
+        /* Keep items stacked (control on top, label/value under) and centred */
         text-align: center;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
     }}
     .stat-value {{
         font-size: 2rem;
@@ -190,6 +200,29 @@ fn generate_html(has_decoder: bool) -> String {
     .sort-toggle:active {{
         transform: translateY(0);
     }}
+
+    /* Improved search input look */
+    .filter-input {{
+        padding: 8px 12px;
+        border: 1px solid rgba(0,0,0,0.12);
+        border-radius: 10px;
+        font-size: 0.95rem;
+        min-width: 220px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+        transition: box-shadow 0.15s ease, transform 0.08s ease, border-color 0.15s ease;
+        background: white;
+        color: #333;
+    }}
+    .filter-input::placeholder {{
+        color: #9aa4b2;
+    }}
+    .filter-input:focus {{
+        outline: none;
+        box-shadow: 0 6px 18px rgba(102,126,234,0.12);
+        transform: translateY(-1px);
+        border-color: rgba(102,126,234,0.6);
+    }}
+
     .container {{
         flex: 1 1 auto;
         display: flex;
@@ -324,6 +357,9 @@ fn generate_html(has_decoder: bool) -> String {
         .decoded-cell {{
             max-height: 80px;
         }}
+        .filter-input {{
+            min-width: 140px;
+        }}
     }}
 </style>
 <script>
@@ -331,22 +367,28 @@ document.addEventListener("DOMContentLoaded", function() {{
     const tableBody = document.querySelector('tbody');
     const eventSource = new EventSource('/sse');
     const topics = new Map();
-    const activeTopicsCount = document.querySelector('.stats .stat-value:first-child');
+
+    // Explicit IDs for robustness
+    const totalTopicsValue = document.getElementById('topic-count');
     const lastUpdatedTime = document.getElementById('last-updated-value');
     const sortButton = document.getElementById('sort-toggle-btn');
-    const filterInput = document.getElementById("filter-input");
-    const filteredCount = document.getElementById("filtered-count");
+    const filterInput = document.getElementById('filter-input');
+    const filteredCount = document.getElementById('filtered-count');
     const hasDecoder = {has_decoder_js};
 
-    let sortMode = 'alphabetical';
+    let sortMode = 'alphabetical'; // 'alphabetical' or 'timestamp'
 
     function updateStats() {{
-        activeTopicsCount.textContent = topics.size;
+        totalTopicsValue.textContent = topics.size;
         lastUpdatedTime.textContent = new Date().toLocaleTimeString();
     }}
 
     function getRowByKey(topicKey) {{
-        return tableBody.querySelector(`tr[data-key="${{topicKey}}"]`);
+        const rows = tableBody.querySelectorAll('tr');
+        for (const r of rows) {{
+            if (r.dataset.key === topicKey) return r;
+        }}
+        return null;
     }}
 
     function sortTopics() {{
@@ -360,11 +402,11 @@ document.addEventListener("DOMContentLoaded", function() {{
     }}
 
     function applyFilter() {{
-        const filter = filterInput.value.toLowerCase();
+        const filter = (filterInput.value || '').toLowerCase();
         let count = 0;
-        const rows = tableBody.querySelectorAll("tr");
+        const rows = tableBody.querySelectorAll('tr');
         rows.forEach(row => {{
-            const topicCell = row.querySelector(".topic-cell");
+            const topicCell = row.querySelector('.topic-cell');
             if (topicCell && topicCell.textContent.toLowerCase().includes(filter)) {{
                 row.style.display = "";
                 count++;
@@ -386,6 +428,7 @@ document.addEventListener("DOMContentLoaded", function() {{
         const decodedContent = hasDecoder && topicData.decoded_content
             ? `<td class="decoded-cell">${{topicData.decoded_content}}</td>`
             : (hasDecoder ? '<td class="decoded-cell">-</td>' : '');
+
         const row = document.createElement('tr');
         row.dataset.key = topicData.key_expr;
         row.dataset.timestamp = topicData.received_timestamp;
@@ -401,50 +444,65 @@ document.addEventListener("DOMContentLoaded", function() {{
     function updateRow(topicData) {{
         const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
         let row = getRowByKey(topicData.key_expr);
+
         if (row) {{
             row.querySelector('.size-cell').textContent = topicData.last_data_size_bytes;
             row.querySelector('.timestamp-cell').textContent = timestampReadable;
             row.dataset.timestamp = topicData.received_timestamp;
+
             if (hasDecoder) {{
                 const decodedCell = row.querySelector('.decoded-cell');
                 if (decodedCell) decodedCell.innerHTML = topicData.decoded_content || '-';
             }}
+
             row.classList.add('updated-row');
             setTimeout(() => row.classList.remove('updated-row'), 500);
+
             if (sortMode === 'timestamp') {{
                 row.remove();
                 insertRowInOrder(row, topicData);
             }}
         }} else {{
             createAndInsertRow(topicData);
+
             if (sortMode === 'alphabetical') {{
                 row = getRowByKey(topicData.key_expr);
-                row.remove();
-                insertRowInOrder(row, topicData);
+                if (row) {{
+                    row.remove();
+                    insertRowInOrder(row, topicData);
+                }}
             }}
         }}
+
+        // Reapply filter so new/updated row respects search
         applyFilter();
     }}
 
     function insertRowInOrder(row, topicData) {{
         const existingRows = tableBody.querySelectorAll('tr');
         let inserted = false;
+
         for (const existingRow of existingRows) {{
             let shouldInsertBefore = false;
+
             if (sortMode === 'alphabetical') {{
                 const existingTopic = existingRow.querySelector('.topic-cell').textContent;
                 shouldInsertBefore = topicData.key_expr.localeCompare(existingTopic) < 0;
             }} else {{
-                const existingTimestamp = parseInt(existingRow.dataset.timestamp);
+                const existingTimestamp = parseInt(existingRow.dataset.timestamp || '0', 10);
                 shouldInsertBefore = topicData.received_timestamp > existingTimestamp;
             }}
+
             if (shouldInsertBefore) {{
                 tableBody.insertBefore(row, existingRow);
                 inserted = true;
                 break;
             }}
         }}
-        if (!inserted) tableBody.appendChild(row);
+
+        if (!inserted) {{
+            tableBody.appendChild(row);
+        }}
     }}
 
     function removeRow(topicKey) {{
@@ -461,30 +519,39 @@ document.addEventListener("DOMContentLoaded", function() {{
             sortMode = 'alphabetical';
             sortButton.textContent = 'Sort: Alphabetical';
         }}
+
         rebuildTable();
     }}
 
+    // Event handlers
     sortButton.addEventListener('click', toggleSort);
     filterInput.addEventListener('input', applyFilter);
 
     eventSource.addEventListener("message", function(event) {{
         try {{
             const delta = JSON.parse(event.data);
-            (delta.updated || []).forEach(topicData => {{
+            const updated = delta.updated || [];
+            const removed = delta.removed || [];
+
+            updated.forEach(topicData => {{
                 topics.set(topicData.key_expr, topicData);
                 updateRow(topicData);
             }});
-            (delta.removed || []).forEach(topicKey => {{
+
+            removed.forEach(topicKey => {{
                 topics.delete(topicKey);
                 removeRow(topicKey);
             }});
+
             updateStats();
         }} catch (error) {{
             console.error("Error processing SSE message:", error);
         }}
     }});
 
+    // initial render state
     updateStats();
+    applyFilter();
 }});
 </script>
 </head>
@@ -496,13 +563,16 @@ document.addEventListener("DOMContentLoaded", function() {{
 <div class="stats">
     <div class="stat-item">
         <span class="stat-value" id="topic-count">0</span>
-        <span class="stat-label">Total Topics</span>
+        <span class="stat-label">Topics</span>
     </div>
+
     <div class="stat-item">
         <button id="sort-toggle-btn" class="sort-toggle">Alphabetical</button>
         <span class="stat-label">Sort Order</span>
     </div>
+
     <div class="stat-item">
+        <!-- Search box above the filtered count (no extra label) -->
         <input
             type="text"
             id="filter-input"
@@ -511,6 +581,7 @@ document.addEventListener("DOMContentLoaded", function() {{
         />
         <span class="stat-label" id="filtered-count">0 Topics</span>
     </div>
+
     <div class="stat-item">
         <span class="stat-value" id="last-updated-value"></span>
         <span class="stat-label">Last Updated</span>
