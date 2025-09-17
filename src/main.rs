@@ -304,41 +304,57 @@ document.addEventListener("DOMContentLoaded", function() {{
     const lastUpdatedTime = document.getElementById('last-updated-value');
     const hasDecoder = {has_decoder_js};
 
+    // updateStats(): updates topic count and last-updated display
     function updateStats() {{
         activeTopicsCount.textContent = topics.size;
         lastUpdatedTime.textContent = new Date().toLocaleTimeString();
     }}
 
-    function updateRow(topicData) {{
-        const rowId = `row-${{topicData.key_expr.replace(/[^\w-]/g, '_')}}`;
-        let row = document.getElementById(rowId);
-        const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
+    // escapeForSelector(s): return an escaped string safe for CSS selectors
+    function escapeForSelector(s) {{
+        if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {{
+            return CSS.escape(s);
+        }}
+        // escape " ' and backslash by prefixing with backslash
+        return s.replace(/["'\\]/g, '\\$&');
+    }}
 
+    // getRowByKey(topicKey): find a <tr> whose data-key matches topicKey
+    function getRowByKey(topicKey) {{
+        const rows = tableBody.querySelectorAll('tr');
+        for (const r of rows) {{
+            if (r.dataset.key === topicKey) return r;
+        }}
+        return null;
+    }}
+
+    // updateRow(topicData): insert or update a table row for the topic
+    function updateRow(topicData) {{
+        const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
         const decodedContent = hasDecoder && topicData.decoded_content
             ? `<td class="decoded-cell">${{topicData.decoded_content}}</td>`
             : (hasDecoder ? '<td class="decoded-cell">-</td>' : '');
+
+        let row = getRowByKey(topicData.key_expr);
 
         if (row) {{
             row.querySelector('.size-cell').textContent = topicData.last_data_size_bytes;
             row.querySelector('.timestamp-cell').textContent = timestampReadable;
             if (hasDecoder) {{
                 const decodedCell = row.querySelector('.decoded-cell');
-                if (decodedCell) {{
-                    decodedCell.innerHTML = topicData.decoded_content || '-';
-                }}
+                if (decodedCell) decodedCell.innerHTML = topicData.decoded_content || '-';
             }}
             row.classList.add('updated-row');
             setTimeout(() => row.classList.remove('updated-row'), 500);
         }} else {{
             row = document.createElement('tr');
-            row.id = rowId;
+            row.dataset.key = topicData.key_expr;
             row.innerHTML = `
                 <td class="topic-cell">${{topicData.key_expr}}</td>
                 <td class="size-cell">${{topicData.last_data_size_bytes}}</td>
                 <td class="timestamp-cell">${{timestampReadable}}</td>
                 ${{decodedContent}}
             `;
-
             const existingRows = tableBody.querySelectorAll('tr');
             let inserted = false;
             for (const existingRow of existingRows) {{
@@ -349,40 +365,41 @@ document.addEventListener("DOMContentLoaded", function() {{
                     break;
                 }}
             }}
-
-            if (!inserted) {{
-                tableBody.appendChild(row);
-            }}
+            if (!inserted) tableBody.appendChild(row);
         }}
     }}
 
+    // removeRow(topicKey): remove a row corresponding to topicKey
     function removeRow(topicKey) {{
-        const rowId = `row-${{topicKey.replace(/[^\w-]/g, '_')}}`;
-        const row = document.getElementById(rowId);
-        if (row) {{
-            row.remove();
-        }}
+        const row = getRowByKey(topicKey);
+        if (row) row.remove();
     }}
 
     eventSource.addEventListener("message", function(event) {{
-        const delta = JSON.parse(event.data);
+        try {{
+            const delta = JSON.parse(event.data);
+            const updated = delta.updated || [];
+            const removed = delta.removed || [];
 
-        delta.updated.forEach(topicData => {{
-            topics.set(topicData.key_expr, topicData);
-            updateRow(topicData);
-        }});
+            updated.forEach(topicData => {{
+                topics.set(topicData.key_expr, topicData);
+                updateRow(topicData);
+            }});
 
-        delta.removed.forEach(topicKey => {{
-            topics.delete(topicKey);
-            removeRow(topicKey);
-        }});
+            removed.forEach(topicKey => {{
+                topics.delete(topicKey);
+                removeRow(topicKey);
+            }});
+
+            updateStats();
+        }} catch (error) {{
+            console.error("Error processing SSE message:", error);
+        }}
     }});
 
     updateStats();
-    setInterval(updateStats, 1000);
 }});
 </script>
-
 </head>
 <body>
 <div class="header">
