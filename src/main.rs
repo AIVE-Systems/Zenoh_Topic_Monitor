@@ -310,14 +310,12 @@ document.addEventListener("DOMContentLoaded", function() {{
     }}
 
     function updateRow(topicData) {{
-        const rowId = `row-${{topicData.key_expr.replace(/[^\w-]/g, '_')}}`;
+        const rowId = `row-${{topicData.key_expr.replace(/[^\\w-]/g, '_')}}`;
         let row = document.getElementById(rowId);
         const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
-
         const decodedContent = hasDecoder && topicData.decoded_content
             ? `<td class="decoded-cell">${{topicData.decoded_content}}</td>`
             : (hasDecoder ? '<td class="decoded-cell">-</td>' : '');
-
         if (row) {{
             row.querySelector('.size-cell').textContent = topicData.last_data_size_bytes;
             row.querySelector('.timestamp-cell').textContent = timestampReadable;
@@ -338,7 +336,6 @@ document.addEventListener("DOMContentLoaded", function() {{
                 <td class="timestamp-cell">${{timestampReadable}}</td>
                 ${{decodedContent}}
             `;
-
             const existingRows = tableBody.querySelectorAll('tr');
             let inserted = false;
             for (const existingRow of existingRows) {{
@@ -349,7 +346,6 @@ document.addEventListener("DOMContentLoaded", function() {{
                     break;
                 }}
             }}
-
             if (!inserted) {{
                 tableBody.appendChild(row);
             }}
@@ -357,7 +353,7 @@ document.addEventListener("DOMContentLoaded", function() {{
     }}
 
     function removeRow(topicKey) {{
-        const rowId = `row-${{topicKey.replace(/[^\w-]/g, '_')}}`;
+        const rowId = `row-${{topicKey.replace(/[^\\w-]/g, '_')}}`;
         const row = document.getElementById(rowId);
         if (row) {{
             row.remove();
@@ -365,21 +361,30 @@ document.addEventListener("DOMContentLoaded", function() {{
     }}
 
     eventSource.addEventListener("message", function(event) {{
-        const delta = JSON.parse(event.data);
+        try {{
+            const delta = JSON.parse(event.data);
+            console.log("Received delta:", delta);
 
-        delta.updated.forEach(topicData => {{
-            topics.set(topicData.key_expr, topicData);
-            updateRow(topicData);
-        }});
+            const updated = delta.updated || [];
+            const removed = delta.removed || [];
 
-        delta.removed.forEach(topicKey => {{
-            topics.delete(topicKey);
-            removeRow(topicKey);
-        }});
+            updated.forEach(topicData => {{
+                topics.set(topicData.key_expr, topicData);
+                updateRow(topicData);
+            }});
+
+            removed.forEach(topicKey => {{
+                topics.delete(topicKey);
+                removeRow(topicKey);
+            }});
+
+            updateStats();
+        }} catch (error) {{
+            console.error("Error processing SSE message:", error);
+        }}
     }});
 
     updateStats();
-    setInterval(updateStats, 1000);
 }});
 </script>
 
