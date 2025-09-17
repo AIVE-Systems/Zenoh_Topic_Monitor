@@ -13,7 +13,7 @@ use zenoh::sample::Sample;
 mod decoder;
 
 type DecoderFn = Option<fn(Sample) -> String>;
-const DECODER: DecoderFn = None; // Or Some(decoder::decoder);
+const DECODER: DecoderFn = Some(decoder::flatbuffer_decoder);
 
 const LOG_LEVEL: log::LevelFilter = LevelFilter::Info;
 const PORT: u16 = 8080;

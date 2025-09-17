@@ -1,0 +1,3 @@
+[submodule "msg_utils"]
+	path = msg_utils
+	url = git@github.com:AIVE-Systems/flatbuffer_msg_utils.git
