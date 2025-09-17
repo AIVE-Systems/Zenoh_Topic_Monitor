@@ -18,11 +18,6 @@ A lightweight, real-time web monitor for Zenoh, built with Rust. This tool subsc
 
 ## 🛠️ Usage
 
-### Prerequisites
-
-- **Zenoh Router**: You need a Zenoh router running. The application is configured to connect to a router at `tcp/127.0.0.1:7447`.
-- **Rust Toolchain**: Ensure you have a working Rust environment.
-
 ### Run the Monitor
 
 1.  Clone this repository:
@@ -30,11 +25,15 @@ A lightweight, real-time web monitor for Zenoh, built with Rust. This tool subsc
     git clone https://github.com/your-username/zenoh-dds-web-monitor.git
     cd zenoh-dds-web-monitor
     ```
-2.  Run the application with Cargo:
+2.  Install the environment with Pixi
     ```bash
-    cargo run
+    pixi install
     ```
-3.  Open your web browser and navigate to `http://localhost:8080`.
+3.  Run the application with Cargo:
+    ```bash
+    pixi run server
+    ```
+4.  Open your web browser and navigate to `http://localhost:8080`.
 
 You'll see a web page that automatically populates with topics as messages are published on the Zenoh network.
 
