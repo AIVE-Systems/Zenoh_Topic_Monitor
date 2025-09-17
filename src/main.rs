@@ -162,6 +162,34 @@ fn generate_html(has_decoder: bool) -> String {
         font-size: 0.9rem;
         opacity: 0.9;
     }}
+    .controls {{
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 15px;
+        margin-bottom: 20px;
+        flex-shrink: 0;
+    }}
+    .sort-toggle {{
+        background: linear-gradient(135deg, #e17055 0%, #d63031 100%);
+        color: white;
+        border: none;
+        padding: 12px 20px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        font-weight: 600;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        transition: all 0.3s ease;
+        min-width: 180px;
+    }}
+    .sort-toggle:hover {{
+        transform: translateY(-2px);
+        box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+    }}
+    .sort-toggle:active {{
+        transform: translateY(0);
+    }}
     .container {{
         flex: 1 1 auto;
         display: flex;
@@ -282,6 +310,10 @@ fn generate_html(has_decoder: bool) -> String {
             flex-direction: column;
             gap: 15px;
         }}
+        .controls {{
+            flex-direction: column;
+            gap: 10px;
+        }}
         .topic-cell, .size-cell, .decoded-cell {{
             max-width: none;
         }}
@@ -301,7 +333,10 @@ document.addEventListener("DOMContentLoaded", function() {{
     const topics = new Map();
     const activeTopicsCount = document.querySelector('.stats .stat-value:first-child');
     const lastUpdatedTime = document.getElementById('last-updated-value');
+    const sortButton = document.getElementById('sort-toggle-btn');
     const hasDecoder = {has_decoder_js};
+
+    let sortMode = 'alphabetical'; // 'alphabetical' or 'timestamp'
 
     // updateStats(): updates topic count and last-updated display
     function updateStats() {{
@@ -327,44 +362,116 @@ document.addEventListener("DOMContentLoaded", function() {{
         return null;
     }}
 
-    // updateRow(topicData): insert or update a table row for the topic
-    function updateRow(topicData) {{
+    // sortTopics(): sort all topics based on current sort mode
+    function sortTopics() {{
+        const topicArray = Array.from(topics.values());
+
+        if (sortMode === 'alphabetical') {{
+            topicArray.sort((a, b) => a.key_expr.localeCompare(b.key_expr));
+        }} else {{
+            // Sort by timestamp, most recent first
+            topicArray.sort((a, b) => b.received_timestamp - a.received_timestamp);
+        }}
+
+        return topicArray;
+    }}
+
+    // rebuildTable(): completely rebuild the table with current sort order
+    function rebuildTable() {{
+        // Clear existing rows
+        tableBody.innerHTML = '';
+
+        // Get sorted topics and rebuild
+        const sortedTopics = sortTopics();
+        sortedTopics.forEach(topicData => {{
+            createAndInsertRow(topicData);
+        }});
+    }}
+
+    // createAndInsertRow(topicData): create a new row for the topic
+    function createAndInsertRow(topicData) {{
         const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
         const decodedContent = hasDecoder && topicData.decoded_content
             ? `<td class="decoded-cell">${{topicData.decoded_content}}</td>`
             : (hasDecoder ? '<td class="decoded-cell">-</td>' : '');
 
+        const row = document.createElement('tr');
+        row.dataset.key = topicData.key_expr;
+        row.dataset.timestamp = topicData.received_timestamp;
+        row.innerHTML = `
+            <td class="topic-cell">${{topicData.key_expr}}</td>
+            <td class="size-cell">${{topicData.last_data_size_bytes}}</td>
+            <td class="timestamp-cell">${{timestampReadable}}</td>
+            ${{decodedContent}}
+        `;
+
+        tableBody.appendChild(row);
+    }}
+
+    // updateRow(topicData): insert or update a table row for the topic
+    function updateRow(topicData) {{
+        const timestampReadable = new Date(topicData.received_timestamp).toISOString().replace('T', ' ').replace('Z', ' UTC');
+
         let row = getRowByKey(topicData.key_expr);
 
         if (row) {{
+            // Update existing row
             row.querySelector('.size-cell').textContent = topicData.last_data_size_bytes;
             row.querySelector('.timestamp-cell').textContent = timestampReadable;
+            row.dataset.timestamp = topicData.received_timestamp;
+
             if (hasDecoder) {{
                 const decodedCell = row.querySelector('.decoded-cell');
                 if (decodedCell) decodedCell.innerHTML = topicData.decoded_content || '-';
             }}
+
             row.classList.add('updated-row');
             setTimeout(() => row.classList.remove('updated-row'), 500);
-        }} else {{
-            row = document.createElement('tr');
-            row.dataset.key = topicData.key_expr;
-            row.innerHTML = `
-                <td class="topic-cell">${{topicData.key_expr}}</td>
-                <td class="size-cell">${{topicData.last_data_size_bytes}}</td>
-                <td class="timestamp-cell">${{timestampReadable}}</td>
-                ${{decodedContent}}
-            `;
-            const existingRows = tableBody.querySelectorAll('tr');
-            let inserted = false;
-            for (const existingRow of existingRows) {{
-                const existingTopic = existingRow.querySelector('.topic-cell').textContent;
-                if (topicData.key_expr.localeCompare(existingTopic) < 0) {{
-                    tableBody.insertBefore(row, existingRow);
-                    inserted = true;
-                    break;
-                }}
+
+            // If sorting by timestamp, we may need to move the row
+            if (sortMode === 'timestamp') {{
+                row.remove();
+                insertRowInOrder(row, topicData);
             }}
-            if (!inserted) tableBody.appendChild(row);
+        }} else {{
+            // Create new row
+            createAndInsertRow(topicData);
+
+            // If we're in alphabetical mode, we need to reposition
+            if (sortMode === 'alphabetical') {{
+                row = getRowByKey(topicData.key_expr);
+                row.remove();
+                insertRowInOrder(row, topicData);
+            }}
+        }}
+    }}
+
+    // insertRowInOrder(row, topicData): insert row in correct position based on sort mode
+    function insertRowInOrder(row, topicData) {{
+        const existingRows = tableBody.querySelectorAll('tr');
+        let inserted = false;
+
+        for (const existingRow of existingRows) {{
+            let shouldInsertBefore = false;
+
+            if (sortMode === 'alphabetical') {{
+                const existingTopic = existingRow.querySelector('.topic-cell').textContent;
+                shouldInsertBefore = topicData.key_expr.localeCompare(existingTopic) < 0;
+            }} else {{
+                // timestamp mode - most recent first
+                const existingTimestamp = parseInt(existingRow.dataset.timestamp);
+                shouldInsertBefore = topicData.received_timestamp > existingTimestamp;
+            }}
+
+            if (shouldInsertBefore) {{
+                tableBody.insertBefore(row, existingRow);
+                inserted = true;
+                break;
+            }}
+        }}
+
+        if (!inserted) {{
+            tableBody.appendChild(row);
         }}
     }}
 
@@ -373,6 +480,22 @@ document.addEventListener("DOMContentLoaded", function() {{
         const row = getRowByKey(topicKey);
         if (row) row.remove();
     }}
+
+    // toggleSort(): switch between sorting modes
+    function toggleSort() {{
+        if (sortMode === 'alphabetical') {{
+            sortMode = 'timestamp';
+            sortButton.textContent = 'Sort: Most Recent First';
+        }} else {{
+            sortMode = 'alphabetical';
+            sortButton.textContent = 'Sort: Alphabetical';
+        }}
+
+        rebuildTable();
+    }}
+
+    // Set up sort button click handler
+    sortButton.addEventListener('click', toggleSort);
 
     eventSource.addEventListener("message", function(event) {{
         try {{
@@ -407,8 +530,21 @@ document.addEventListener("DOMContentLoaded", function() {{
 </div>
 <div class="stats">
     <div class="stat-item">
-        <span class="stat-value">0</span>
+        <span class="stat-value" id="topic-count">0</span>
         <span class="stat-label">Topics</span>
+    </div>
+    <div class="stat-item">
+        <button id="sort-toggle-btn" class="sort-toggle">Alphabetical</button>
+        <span class="stat-label">Sort Order</span>
+    </div>
+    <div class="stat-item">
+        <input
+            type="text"
+            id="filter-input"
+            class="filter-input"
+            placeholder="Filter topics..."
+        />
+        <span class="stat-label" id="filtered-count">0 Topics</span>
     </div>
     <div class="stat-item">
         <span class="stat-value" id="last-updated-value"></span>
@@ -428,7 +564,7 @@ document.addEventListener("DOMContentLoaded", function() {{
         <tbody></tbody>
     </table>
 </div>
-<div class="refresh-info">🔄 Updates every {}ms | Built with Zenoh + Rust + Warp</div>
+<div class="refresh-info">📊 Updates every {}ms | Built with Zenoh + Rust + Warp</div>
 </body>
 </html>"#,
         RELOAD_PERIOD_MS,
