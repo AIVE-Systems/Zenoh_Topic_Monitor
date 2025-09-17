@@ -13,7 +13,7 @@ use zenoh::sample::Sample;
 mod decoder;
 
 type DecoderFn = Option<fn(Sample) -> String>;
-const DECODER: DecoderFn = None; // Or Some(decoder::decoder);
+const DECODER: DecoderFn = Some(decoder::decoder); // Or None;
 
 const LOG_LEVEL: log::LevelFilter = LevelFilter::Info;
 const PORT: u16 = 8080;
@@ -231,21 +231,20 @@ fn generate_html(has_decoder: bool) -> String {
     .size-cell {{
         font-family: 'Fira Code', 'Courier New', monospace;
         word-break: break-word;
-        background-color: #f8f9fa;
+        background-color: transparent;
         border-radius: 4px;
         padding: 8px;
-        font-size: 0.9rem;
-        line-height: 1.4;
     }}
     .timestamp-cell {{
-        font-size: 0.85rem;
-        color: #6c757d;
+        font-family: 'Fira Code', 'Courier New', monospace;
         white-space: nowrap;
+        background-color: transparent;
+        border-radius: 4px;
+        padding: 8px;
     }}
     .decoded-cell {{
         font-family: 'Fira Code', 'Courier New', monospace;
-        font-size: 0.85rem;
-        background-color: #f8f9fa;
+        background-color: transparent;
         border-radius: 4px;
         padding: 8px;
         max-height: 100px;
@@ -275,7 +274,7 @@ fn generate_html(has_decoder: bool) -> String {
     }}
     @keyframes fade-highlight {{
         from {{ background-color: #ffffa6; }}
-        to {{ background-color: #f8f9fb; }}
+        to {{ background-color: transparent; }}
     }}
     /* Responsive design */
     @media (max-width: 768px) {{
